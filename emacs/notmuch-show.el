@@ -1376,7 +1376,8 @@ current thread."
 
 (defun notmuch-show-mark-read ()
   "Mark the current message as read."
-  (notmuch-show-tag-message "-unread"))
+  (notmuch-show-tag-message "-unread")
+  (notmuch-show-tag-message "-unseen"))
 
 ;; Functions for getting attributes of several messages in the current
 ;; thread.

@@ -555,6 +555,7 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
 This function advances the next thread when finished."
   (interactive)
   (notmuch-search-tag '("-inbox"))
+  (notmuch-search-tag '("-unseen"))
   (notmuch-search-next-thread))
 
 (defvar notmuch-search-process-filter-data nil
