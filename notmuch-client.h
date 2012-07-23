@@ -36,6 +36,9 @@
  * these to check the version number. */
 #ifdef GMIME_MAJOR_VERSION
 #define GMIME_ATLEAST_26
+typedef GMimeCryptoContext notmuch_crypto_context_t;
+#else
+typedef GMimeCipherContext notmuch_crypto_context_t;
 #endif
 
 #include "notmuch.h"
@@ -72,19 +75,21 @@ typedef struct notmuch_show_format {
 			      const struct notmuch_show_params *params);
     const char *message_set_sep;
     const char *message_set_end;
+    const char *null_message;
 } notmuch_show_format_t;
+
+typedef struct notmuch_crypto {
+    notmuch_crypto_context_t* gpgctx;
+    notmuch_bool_t verify;
+    notmuch_bool_t decrypt;
+} notmuch_crypto_t;
 
 typedef struct notmuch_show_params {
     notmuch_bool_t entire_thread;
     notmuch_bool_t omit_excluded;
     notmuch_bool_t raw;
     int part;
-#ifdef GMIME_ATLEAST_26
-    GMimeCryptoContext* cryptoctx;
-#else
-    GMimeCipherContext* cryptoctx;
-#endif
-    notmuch_bool_t decrypt;
+    notmuch_crypto_t crypto;
 } notmuch_show_params_t;
 
 /* There's no point in continuing when we've detected that we've done
@@ -112,6 +117,12 @@ chomp_newline (char *str)
     if (str && str[strlen(str)-1] == '\n')
 	str[strlen(str)-1] = '\0';
 }
+
+notmuch_crypto_context_t *
+notmuch_crypto_get_context (notmuch_crypto_t *crypto, const char *protocol);
+
+int
+notmuch_crypto_cleanup (notmuch_crypto_t *crypto);
 
 int
 notmuch_count_command (void *ctx, int argc, char *argv[]);
@@ -341,9 +352,10 @@ struct mime_node {
 };
 
 /* Construct a new MIME node pointing to the root message part of
- * message.  If cryptoctx is non-NULL, it will be used to verify
- * signatures on any child parts.  If decrypt is true, then cryptoctx
- * will additionally be used to decrypt any encrypted child parts.
+ * message. If crypto->verify is true, signed child parts will be
+ * verified. If crypto->decrypt is true, encrypted child parts will be
+ * decrypted.  If crypto->gpgctx is NULL, it will be lazily
+ * initialized.
  *
  * Return value:
  *
@@ -355,12 +367,7 @@ struct mime_node {
  */
 notmuch_status_t
 mime_node_open (const void *ctx, notmuch_message_t *message,
-#ifdef GMIME_ATLEAST_26
-		GMimeCryptoContext *cryptoctx,
-#else
-		GMimeCipherContext *cryptoctx,
-#endif
-		notmuch_bool_t decrypt, mime_node_t **node_out);
+		notmuch_crypto_t *crypto, mime_node_t **node_out);
 
 /* Return a new MIME node for the requested child part of parent.
  * parent will be used as the talloc context for the returned child

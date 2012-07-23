@@ -37,7 +37,8 @@ static const notmuch_show_format_t format_json = {
     .message_set_start = "[",
     .part = format_part_json_entry,
     .message_set_sep = ", ",
-    .message_set_end = "]"
+    .message_set_end = "]",
+    .null_message = "null"
 };
 
 static notmuch_status_t
@@ -800,6 +801,15 @@ format_part_raw (unused (const void *ctx), mime_node_t *node,
 }
 
 static notmuch_status_t
+show_null_message (const notmuch_show_format_t *format)
+{
+    /* Output a null message. Currently empty for all formats except Json */
+    if (format->null_message)
+	printf ("%s", format->null_message);
+    return NOTMUCH_STATUS_SUCCESS;
+}
+
+static notmuch_status_t
 show_message (void *ctx,
 	      const notmuch_show_format_t *format,
 	      notmuch_message_t *message,
@@ -810,8 +820,7 @@ show_message (void *ctx,
     mime_node_t *root, *part;
     notmuch_status_t status;
 
-    status = mime_node_open (local, message, params->cryptoctx,
-			     params->decrypt, &root);
+    status = mime_node_open (local, message, &(params->crypto), &root);
     if (status)
 	goto DONE;
     part = mime_node_seek_dfs (root, (params->part < 0 ? 0 : params->part));
@@ -862,10 +871,12 @@ show_messages (void *ctx,
 	    if (status && !res)
 		res = status;
 	    next_indent = indent + 1;
-
-	    if (!status && format->message_set_sep)
-		fputs (format->message_set_sep, stdout);
+	} else {
+	    status = show_null_message (format);
 	}
+
+	if (!status && format->message_set_sep)
+	    fputs (format->message_set_sep, stdout);
 
 	status = show_messages (ctx,
 				format,
@@ -969,6 +980,12 @@ enum {
     NOTMUCH_FORMAT_RAW
 };
 
+enum {
+    ENTIRE_THREAD_DEFAULT,
+    ENTIRE_THREAD_TRUE,
+    ENTIRE_THREAD_FALSE,
+};
+
 /* The following is to allow future options to be added more easily */
 enum {
     EXCLUDE_TRUE,
@@ -984,10 +1001,17 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     char *query_string;
     int opt_index, ret;
     const notmuch_show_format_t *format = &format_text;
-    notmuch_show_params_t params = { .part = -1, .omit_excluded = TRUE };
+    notmuch_show_params_t params = {
+	.part = -1,
+	.omit_excluded = TRUE,
+	.crypto = {
+	    .verify = FALSE,
+	    .decrypt = FALSE
+	}
+    };
     int format_sel = NOTMUCH_FORMAT_NOT_SPECIFIED;
-    notmuch_bool_t verify = FALSE;
     int exclude = EXCLUDE_TRUE;
+    int entire_thread = ENTIRE_THREAD_DEFAULT;
 
     notmuch_opt_desc_t options[] = {
 	{ NOTMUCH_OPT_KEYWORD, &format_sel, "format", 'f',
@@ -996,14 +1020,18 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 				  { "mbox", NOTMUCH_FORMAT_MBOX },
 				  { "raw", NOTMUCH_FORMAT_RAW },
 				  { 0, 0 } } },
-        { NOTMUCH_OPT_KEYWORD, &exclude, "exclude", 'x',
-          (notmuch_keyword_t []){ { "true", EXCLUDE_TRUE },
-                                  { "false", EXCLUDE_FALSE },
-                                  { 0, 0 } } },
+	{ NOTMUCH_OPT_KEYWORD, &exclude, "exclude", 'x',
+	  (notmuch_keyword_t []){ { "true", EXCLUDE_TRUE },
+				  { "false", EXCLUDE_FALSE },
+				  { 0, 0 } } },
+	{ NOTMUCH_OPT_KEYWORD, &entire_thread, "entire-thread", 't',
+	  (notmuch_keyword_t []){ { "true", ENTIRE_THREAD_TRUE },
+				  { "false", ENTIRE_THREAD_FALSE },
+				  { "", ENTIRE_THREAD_TRUE },
+				  { 0, 0 } } },
 	{ NOTMUCH_OPT_INT, &params.part, "part", 'p', 0 },
-	{ NOTMUCH_OPT_BOOLEAN, &params.entire_thread, "entire-thread", 't', 0 },
-	{ NOTMUCH_OPT_BOOLEAN, &params.decrypt, "decrypt", 'd', 0 },
-	{ NOTMUCH_OPT_BOOLEAN, &verify, "verify", 'v', 0 },
+	{ NOTMUCH_OPT_BOOLEAN, &params.crypto.decrypt, "decrypt", 'd', 0 },
+	{ NOTMUCH_OPT_BOOLEAN, &params.crypto.verify, "verify", 'v', 0 },
 	{ 0, 0, 0, 0, 0 }
     };
 
@@ -1012,6 +1040,10 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	/* diagnostics already printed */
 	return 1;
     }
+
+    /* decryption implies verification */
+    if (params.crypto.decrypt)
+	params.crypto.verify = TRUE;
 
     if (format_sel == NOTMUCH_FORMAT_NOT_SPECIFIED) {
 	/* if part was requested and format was not specified, use format=raw */
@@ -1024,7 +1056,6 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     switch (format_sel) {
     case NOTMUCH_FORMAT_JSON:
 	format = &format_json;
-	params.entire_thread = TRUE;
 	break;
     case NOTMUCH_FORMAT_TEXT:
 	format = &format_text;
@@ -1047,24 +1078,18 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	break;
     }
 
-    if (params.decrypt || verify) {
-#ifdef GMIME_ATLEAST_26
-	/* TODO: GMimePasswordRequestFunc */
-	params.cryptoctx = g_mime_gpg_context_new (NULL, "gpg");
-#else
-	GMimeSession* session = g_object_new (g_mime_session_get_type(), NULL);
-	params.cryptoctx = g_mime_gpg_context_new (session, "gpg");
-#endif
-	if (params.cryptoctx) {
-	    g_mime_gpg_context_set_always_trust ((GMimeGpgContext*) params.cryptoctx, FALSE);
-	} else {
-	    params.decrypt = FALSE;
-	    fprintf (stderr, "Failed to construct gpg context.\n");
-	}
-#ifndef GMIME_ATLEAST_26
-	g_object_unref (session);
-#endif
+    /* Default is entire-thread = FALSE except for format=json. */
+    if (entire_thread == ENTIRE_THREAD_DEFAULT) {
+	if (format == &format_json)
+	    entire_thread = ENTIRE_THREAD_TRUE;
+	else
+	    entire_thread = ENTIRE_THREAD_FALSE;
     }
+
+    if (entire_thread == ENTIRE_THREAD_TRUE)
+	params.entire_thread = TRUE;
+    else
+	params.entire_thread = FALSE;
 
     config = notmuch_config_open (ctx, NULL, NULL);
     if (config == NULL)
@@ -1115,11 +1140,9 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	ret = do_show (ctx, query, format, &params);
     }
 
+    notmuch_crypto_cleanup (&params.crypto);
     notmuch_query_destroy (query);
     notmuch_database_destroy (notmuch);
-
-    if (params.cryptoctx)
-	g_object_unref(params.cryptoctx);
 
     return ret;
 }

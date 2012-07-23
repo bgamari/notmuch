@@ -60,7 +60,7 @@
 (require 'notmuch-message)
 
 (defcustom notmuch-search-result-format
-  `(("date" . "%s ")
+  `(("date" . "%12s ")
     ("count" . "%-7s ")
     ("authors" . "%-20s ")
     ("subject" . "%s ")
@@ -558,17 +558,14 @@ This function advances the next thread when finished."
   (notmuch-search-tag '("-unseen"))
   (notmuch-search-next-thread))
 
-(defvar notmuch-search-process-filter-data nil
-  "Data that has not yet been processed.")
-(make-variable-buffer-local 'notmuch-search-process-filter-data)
-
 (defun notmuch-search-process-sentinel (proc msg)
   "Add a message to let user know when \"notmuch search\" exits"
   (let ((buffer (process-buffer proc))
 	(status (process-status proc))
 	(exit-status (process-exit-status proc))
 	(never-found-target-thread nil))
-    (if (memq status '(exit signal))
+    (when (memq status '(exit signal))
+	(kill-buffer (process-get proc 'parse-buf))
 	(if (buffer-live-p buffer)
 	    (with-current-buffer buffer
 	      (save-excursion
@@ -578,8 +575,6 @@ This function advances the next thread when finished."
 		  (if (eq status 'signal)
 		      (insert "Incomplete search results (search process was killed).\n"))
 		  (when (eq status 'exit)
-		    (if notmuch-search-process-filter-data
-			(insert (concat "Error: Unexpected output from notmuch search:\n" notmuch-search-process-filter-data)))
 		    (insert "End of search results.")
 		    (unless (= exit-status 0)
 		      (insert (format " (process returned %d)" exit-status)))
@@ -708,78 +703,110 @@ non-authors is found, assume that all of the authors match."
 	  (overlay-put overlay 'isearch-open-invisible #'delete-overlay)))
       (insert padding))))
 
-(defun notmuch-search-insert-field (field date count authors subject tags)
+(defun notmuch-search-insert-field (field format-string result)
   (cond
    ((string-equal field "date")
-    (insert (propertize (format (cdr (assoc field notmuch-search-result-format)) date)
+    (insert (propertize (format format-string (plist-get result :date_relative))
 			'face 'notmuch-search-date)))
    ((string-equal field "count")
-    (insert (propertize (format (cdr (assoc field notmuch-search-result-format)) count)
+    (insert (propertize (format format-string
+				(format "[%s/%s]" (plist-get result :matched)
+					(plist-get result :total)))
 			'face 'notmuch-search-count)))
    ((string-equal field "subject")
-    (insert (propertize (format (cdr (assoc field notmuch-search-result-format)) subject)
+    (insert (propertize (format format-string (plist-get result :subject))
 			'face 'notmuch-search-subject)))
 
    ((string-equal field "authors")
-    (notmuch-search-insert-authors (cdr (assoc field notmuch-search-result-format)) authors))
+    (notmuch-search-insert-authors format-string (plist-get result :authors)))
 
    ((string-equal field "tags")
-    (insert (concat "(" (propertize tags 'font-lock-face 'notmuch-tag-face) ")")))))
+    ;; Ignore format-string here because notmuch-search-set-tags
+    ;; depends on the format of this
+    (insert (concat "(" (propertize
+			 (mapconcat 'identity (plist-get result :tags) " ")
+			 'font-lock-face 'notmuch-tag-face) ")")))))
 
-(defun notmuch-search-show-result (date count authors subject tags)
-  (let ((fields) (field))
-    (setq fields (mapcar 'car notmuch-search-result-format))
-    (loop for field in fields
-	  do (notmuch-search-insert-field field date count authors subject tags)))
-  (insert "\n"))
+(defun notmuch-search-show-result (result)
+  ;; Ignore excluded matches
+  (unless (= (plist-get result :matched) 0)
+    (let ((beg (point-max)))
+      (save-excursion
+	(goto-char beg)
+	(dolist (spec notmuch-search-result-format)
+	  (notmuch-search-insert-field (car spec) (cdr spec) result))
+	(insert "\n")
+	(notmuch-search-color-line beg (point) (plist-get result :tags))
+	(put-text-property beg (point) 'notmuch-search-thread-id
+			   (concat "thread:" (plist-get result :thread)))
+	(put-text-property beg (point) 'notmuch-search-authors
+			   (plist-get result :authors))
+	(put-text-property beg (point) 'notmuch-search-subject
+			   (plist-get result :subject)))
+      (when (string= (plist-get result :thread) notmuch-search-target-thread)
+	(setq notmuch-search-target-thread "found")
+	(goto-char beg)))))
+
+(defun notmuch-search-show-error (string &rest objects)
+  (save-excursion
+    (goto-char (point-max))
+    (insert "Error: Unexpected output from notmuch search:\n")
+    (insert (apply #'format string objects))
+    (insert "\n")))
+
+(defvar notmuch-search-process-state nil
+  "Parsing state of the search process filter.")
+
+(defvar notmuch-search-json-parser nil
+  "Incremental JSON parser for the search process filter.")
 
 (defun notmuch-search-process-filter (proc string)
   "Process and filter the output of \"notmuch search\""
-  (let ((buffer (process-buffer proc))
-	(found-target nil))
-    (if (buffer-live-p buffer)
-	(with-current-buffer buffer
-	  (save-excursion
-	    (let ((line 0)
-		  (more t)
-		  (inhibit-read-only t)
-		  (string (concat notmuch-search-process-filter-data string)))
-	      (setq notmuch-search-process-filter-data nil)
-	      (while more
-		(while (and (< line (length string)) (= (elt string line) ?\n))
-		  (setq line (1+ line)))
-		(if (string-match "^\\(thread:[0-9A-Fa-f]*\\) \\([^][]*\\) \\(\\[[0-9/]*\\]\\) \\([^;]*\\); \\(.*\\) (\\([^()]*\\))$" string line)
-		    (let* ((thread-id (match-string 1 string))
-			   (date (match-string 2 string))
-			   (count (match-string 3 string))
-			   (authors (match-string 4 string))
-			   (subject (match-string 5 string))
-			   (tags (match-string 6 string))
-			   (tag-list (if tags (save-match-data (split-string tags)))))
-		      (goto-char (point-max))
-		      (if (/= (match-beginning 1) line)
-			  (insert (concat "Error: Unexpected output from notmuch search:\n" (substring string line (match-beginning 1)) "\n")))
-		      ;; We currently just throw away excluded matches.
-		      (unless (eq (aref count 1) ?0)
-			(let ((beg (point)))
-			  (notmuch-search-show-result date count authors subject tags)
-			  (notmuch-search-color-line beg (point) tag-list)
-			  (put-text-property beg (point) 'notmuch-search-thread-id thread-id)
-			  (put-text-property beg (point) 'notmuch-search-authors authors)
-			  (put-text-property beg (point) 'notmuch-search-subject subject)
-			  (when (string= thread-id notmuch-search-target-thread)
-			    (set 'found-target beg)
-			    (set 'notmuch-search-target-thread "found"))))
-		      (set 'line (match-end 0)))
-		  (set 'more nil)
-		  (while (and (< line (length string)) (= (elt string line) ?\n))
-		    (setq line (1+ line)))
-		  (if (< line (length string))
-		      (setq notmuch-search-process-filter-data (substring string line)))
-		  ))))
-	  (if found-target
-	      (goto-char found-target)))
-      (delete-process proc))))
+  (let ((results-buf (process-buffer proc))
+	(parse-buf (process-get proc 'parse-buf))
+	(inhibit-read-only t)
+	done)
+    (if (not (buffer-live-p results-buf))
+	(delete-process proc)
+      (with-current-buffer parse-buf
+	;; Insert new data
+	(save-excursion
+	  (goto-char (point-max))
+	  (insert string)))
+      (with-current-buffer results-buf
+	(while (not done)
+	  (condition-case nil
+	      (case notmuch-search-process-state
+		((begin)
+		 ;; Enter the results list
+		 (if (eq (notmuch-json-begin-compound
+			  notmuch-search-json-parser) 'retry)
+		     (setq done t)
+		   (setq notmuch-search-process-state 'result)))
+		((result)
+		 ;; Parse a result
+		 (let ((result (notmuch-json-read notmuch-search-json-parser)))
+		   (case result
+		     ((retry) (setq done t))
+		     ((end) (setq notmuch-search-process-state 'end))
+		     (otherwise (notmuch-search-show-result result)))))
+		((end)
+		 ;; Any trailing data is unexpected
+		 (notmuch-json-eof notmuch-search-json-parser)
+		 (setq done t)))
+	    (json-error
+	     ;; Do our best to resynchronize and ensure forward
+	     ;; progress
+	     (notmuch-search-show-error
+	      "%s"
+	      (with-current-buffer parse-buf
+		(let ((bad (buffer-substring (line-beginning-position)
+					     (line-end-position))))
+		  (forward-line)
+		  bad))))))
+	;; Clear out what we've parsed
+	(with-current-buffer parse-buf
+	  (delete-region (point-min) (point)))))))
 
 (defun notmuch-search-tag-all (&optional tag-changes)
   "Add/remove tags from all messages in current search buffer.
@@ -882,10 +909,19 @@ Other optional parameters are used as follows:
 	(let ((proc (start-process
 		     "notmuch-search" buffer
 		     notmuch-command "search"
+		     "--format=json"
 		     (if oldest-first
 			 "--sort=oldest-first"
 		       "--sort=newest-first")
-		     query)))
+		     query))
+	      ;; Use a scratch buffer to accumulate partial output.
+	      ;; This buffer will be killed by the sentinel, which
+	      ;; should be called no matter how the process dies.
+	      (parse-buf (generate-new-buffer " *notmuch search parse*")))
+	  (set (make-local-variable 'notmuch-search-process-state) 'begin)
+	  (set (make-local-variable 'notmuch-search-json-parser)
+	       (notmuch-json-create-parser parse-buf))
+	  (process-put proc 'parse-buf parse-buf)
 	  (set-process-sentinel proc 'notmuch-search-process-sentinel)
 	  (set-process-filter proc 'notmuch-search-process-filter)
 	  (set-process-query-on-exit-flag proc nil))))
