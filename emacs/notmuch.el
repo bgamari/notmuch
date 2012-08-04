@@ -69,7 +69,13 @@
 	date, count, authors, subject, tags
 For example:
 	(setq notmuch-search-result-format \(\(\"authors\" . \"%-40s\"\)
-					     \(\"subject\" . \"%s\"\)\)\)"
+					     \(\"subject\" . \"%s\"\)\)\)
+Line breaks are permitted in format strings (though this is
+currently experimental).  Note that a line break at the end of an
+\"authors\" field will get elided if the authors list is long;
+place it instead at the beginning of the following field.  To
+enter a line break when setting this variable with setq, use \\n.
+To enter a line break in customize, press \\[quoted-insert] C-j."
   :type '(alist :key-type (string) :value-type (string))
   :group 'notmuch-search)
 
@@ -287,18 +293,25 @@ For a mouse binding, return nil."
 (defun notmuch-search-next-thread ()
   "Select the next thread in the search results."
   (interactive)
-  (forward-line 1))
+  (when (notmuch-search-get-result)
+    (goto-char (notmuch-search-result-end))))
 
 (defun notmuch-search-previous-thread ()
   "Select the previous thread in the search results."
   (interactive)
-  (forward-line -1))
+  (if (notmuch-search-get-result)
+      (unless (bobp)
+	(goto-char (notmuch-search-result-beginning (- (point) 1))))
+    ;; We must be past the end; jump to the last result
+    (notmuch-search-last-thread)))
 
 (defun notmuch-search-last-thread ()
   "Select the last thread in the search results."
   (interactive)
   (goto-char (point-max))
-  (forward-line -2))
+  (forward-line -2)
+  (let ((beg (notmuch-search-result-beginning)))
+    (when beg (goto-char beg))))
 
 (defun notmuch-search-first-thread ()
   "Select the first thread in the search results."
@@ -401,25 +414,76 @@ Complete list of currently available key bindings:
 	mode-name "notmuch-search")
   (setq buffer-read-only t))
 
+(defun notmuch-search-get-result (&optional pos)
+  "Return the result object for the thread at POS (or point).
+
+If there is no thread at POS (or point), returns nil."
+  (get-text-property (or pos (point)) 'notmuch-search-result))
+
+(defun notmuch-search-result-beginning (&optional pos)
+  "Return the point at the beginning of the thread at POS (or point).
+
+If there is no thread at POS (or point), returns nil."
+  (when (notmuch-search-get-result pos)
+    ;; We pass 1+point because previous-single-property-change starts
+    ;; searching one before the position we give it.
+    (previous-single-property-change (1+ (or pos (point)))
+				     'notmuch-search-result nil (point-min))))
+
+(defun notmuch-search-result-end (&optional pos)
+  "Return the point at the end of the thread at POS (or point).
+
+The returned point will be just after the newline character that
+ends the result line.  If there is no thread at POS (or point),
+returns nil"
+  (when (notmuch-search-get-result pos)
+    (next-single-property-change (or pos (point)) 'notmuch-search-result
+				 nil (point-max))))
+
+(defun notmuch-search-foreach-result (beg end function)
+  "Invoke FUNCTION for each result between BEG and END.
+
+FUNCTION should take one argument.  It will be applied to the
+character position of the beginning of each result that overlaps
+the region between points BEG and END.  As a special case, if (=
+BEG END), FUNCTION will be applied to the result containing point
+BEG."
+
+  (lexical-let ((pos (notmuch-search-result-beginning beg))
+		;; End must be a marker in case function changes the
+		;; text.
+		(end (copy-marker end))
+		;; Make sure we examine at least one result, even if
+		;; (= beg end).
+		(first t))
+    ;; We have to be careful if the region extends beyond the results.
+    ;; In this case, pos could be null or there could be no result at
+    ;; pos.
+    (while (and pos (or (< pos end) first))
+      (when (notmuch-search-get-result pos)
+	(funcall function pos))
+      (setq pos (notmuch-search-result-end pos)
+	    first nil))))
+;; Unindent the function argument of notmuch-search-foreach-result so
+;; the indentation of callers doesn't get out of hand.
+(put 'notmuch-search-foreach-result 'lisp-indent-function 2)
+
 (defun notmuch-search-properties-in-region (property beg end)
-  (save-excursion
-    (let ((output nil)
-	  (last-line (line-number-at-pos end))
-	  (max-line (- (line-number-at-pos (point-max)) 2)))
-      (goto-char beg)
-      (beginning-of-line)
-      (while (<= (line-number-at-pos) (min last-line max-line))
-	(setq output (cons (get-text-property (point) property) output))
-	(forward-line 1))
-      output)))
+  (let (output)
+    (notmuch-search-foreach-result beg end
+      (lambda (pos)
+	(push (plist-get (notmuch-search-get-result pos) property) output)))
+    output))
 
 (defun notmuch-search-find-thread-id ()
   "Return the thread for the current thread"
-  (get-text-property (point) 'notmuch-search-thread-id))
+  (let ((thread (plist-get (notmuch-search-get-result) :thread)))
+    (when thread (concat "thread:" thread))))
 
 (defun notmuch-search-find-thread-id-region (beg end)
   "Return a list of threads for the current region"
-  (notmuch-search-properties-in-region 'notmuch-search-thread-id beg end))
+  (mapcar (lambda (thread) (concat "thread:" thread))
+	  (notmuch-search-properties-in-region :thread beg end)))
 
 (defun notmuch-search-find-thread-id-region-search (beg end)
   "Return a search string for threads for the current region"
@@ -427,19 +491,19 @@ Complete list of currently available key bindings:
 
 (defun notmuch-search-find-authors ()
   "Return the authors for the current thread"
-  (get-text-property (point) 'notmuch-search-authors))
+  (plist-get (notmuch-search-get-result) :authors))
 
 (defun notmuch-search-find-authors-region (beg end)
   "Return a list of authors for the current region"
-  (notmuch-search-properties-in-region 'notmuch-search-authors beg end))
+  (notmuch-search-properties-in-region :authors beg end))
 
 (defun notmuch-search-find-subject ()
   "Return the subject for the current thread"
-  (get-text-property (point) 'notmuch-search-subject))
+  (plist-get (notmuch-search-get-result) :subject))
 
 (defun notmuch-search-find-subject-region (beg end)
   "Return a list of authors for the current region"
-  (notmuch-search-properties-in-region 'notmuch-search-subject beg end))
+  (notmuch-search-properties-in-region :subject beg end))
 
 (defun notmuch-search-show-thread ()
   "Display the currently selected thread."
@@ -483,52 +547,29 @@ and will also appear in a buffer named \"*Notmuch errors*\"."
 	    (error (buffer-substring beg end))
 	    ))))))
 
-(defun notmuch-search-set-tags (tags)
-  (save-excursion
-    (end-of-line)
-    (re-search-backward "(")
-    (forward-char)
-    (let ((beg (point))
-	  (inhibit-read-only t))
-      (re-search-forward ")")
-      (backward-char)
-      (let ((end (point)))
-	(delete-region beg end)
-	(insert (propertize (mapconcat  'identity tags " ")
-			    'face 'notmuch-tag-face))))))
+(defun notmuch-search-set-tags (tags &optional pos)
+  (let ((new-result (plist-put (notmuch-search-get-result pos) :tags tags)))
+    (notmuch-search-update-result new-result pos)))
 
-(defun notmuch-search-get-tags ()
-  (save-excursion
-    (end-of-line)
-    (re-search-backward "(")
-    (let ((beg (+ (point) 1)))
-      (re-search-forward ")")
-      (let ((end (- (point) 1)))
-	(split-string (buffer-substring-no-properties beg end))))))
+(defun notmuch-search-get-tags (&optional pos)
+  (plist-get (notmuch-search-get-result pos) :tags))
 
 (defun notmuch-search-get-tags-region (beg end)
-  (save-excursion
-    (let ((output nil)
-	  (last-line (line-number-at-pos end))
-	  (max-line (- (line-number-at-pos (point-max)) 2)))
-      (goto-char beg)
-      (while (<= (line-number-at-pos) (min last-line max-line))
-	(setq output (append output (notmuch-search-get-tags)))
-	(forward-line 1))
-      output)))
+  (let (output)
+    (notmuch-search-foreach-result beg end
+      (lambda (pos)
+	(setq output (append output (notmuch-search-get-tags pos)))))
+    output))
 
 (defun notmuch-search-tag-region (beg end &optional tag-changes)
   "Change tags for threads in the given region."
   (let ((search-string (notmuch-search-find-thread-id-region-search beg end)))
     (setq tag-changes (funcall 'notmuch-tag search-string tag-changes))
-    (save-excursion
-      (let ((last-line (line-number-at-pos end))
-	    (max-line (- (line-number-at-pos (point-max)) 2)))
-	(goto-char beg)
-	(while (<= (line-number-at-pos) (min last-line max-line))
-	  (notmuch-search-set-tags
-	   (notmuch-update-tags (notmuch-search-get-tags) tag-changes))
-	  (forward-line))))))
+    (notmuch-search-foreach-result beg end
+      (lambda (pos)
+	(notmuch-search-set-tags
+	 (notmuch-update-tags (notmuch-search-get-tags pos) tag-changes)
+	 pos)))))
 
 (defun notmuch-search-tag (&optional tag-changes)
   "Change tags for the currently selected thread or region.
@@ -557,6 +598,34 @@ This function advances the next thread when finished."
   (notmuch-search-tag '("-inbox"))
   (notmuch-search-tag '("-unseen"))
   (notmuch-search-next-thread))
+
+(defun notmuch-search-update-result (result &optional pos)
+  "Replace the result object of the thread at POS (or point) by
+RESULT and redraw it.
+
+This will keep point in a reasonable location.  However, if there
+are enclosing save-excursions and the saved point is in the
+result being updated, the point will be restored to the beginning
+of the result."
+  (let ((start (notmuch-search-result-beginning pos))
+	(end (notmuch-search-result-end pos))
+	(init-point (point))
+	(inhibit-read-only t))
+    ;; Delete the current thread
+    (delete-region start end)
+    ;; Insert the updated thread
+    (notmuch-search-show-result result start)
+    ;; If point was inside the old result, make an educated guess
+    ;; about where to place it now.  Unfortunately, this won't work
+    ;; with save-excursion (or any other markers that would be nice to
+    ;; preserve, such as the window start), but there's nothing we can
+    ;; do about that without a way to retrieve markers in a region.
+    (when (and (>= init-point start) (<= init-point end))
+      (let* ((new-end (notmuch-search-result-end start))
+	     (new-point (if (= init-point end)
+			    new-end
+			  (min init-point (- new-end 1)))))
+	(goto-char new-point)))))
 
 (defun notmuch-search-process-sentinel (proc msg)
   "Add a message to let user know when \"notmuch search\" exits"
@@ -608,20 +677,13 @@ foreground and blue background."
 
 (defun notmuch-search-color-line (start end line-tag-list)
   "Colorize lines in `notmuch-show' based on tags."
-  ;; Create the overlay only if the message has tags which match one
-  ;; of those specified in `notmuch-search-line-faces'.
-  (let (overlay)
-    (mapc (lambda (elem)
-	    (let ((tag (car elem))
-		  (attributes (cdr elem)))
-	      (when (member tag line-tag-list)
-		(when (not overlay)
-		  (setq overlay (make-overlay start end)))
-		;; Merge the specified properties with any already
-		;; applied from an earlier match.
-		(overlay-put overlay 'face
-			     (append (overlay-get overlay 'face) attributes)))))
-	  notmuch-search-line-faces)))
+  (mapc (lambda (elem)
+	  (let ((tag (car elem))
+		(attributes (cdr elem)))
+	    (when (member tag line-tag-list)
+	      (notmuch-combine-face-text-property start end attributes))))
+	;; Reverse the list so earlier entries take precedence
+	(reverse notmuch-search-line-faces)))
 
 (defun notmuch-search-author-propertize (authors)
   "Split `authors' into matching and non-matching authors and
@@ -721,28 +783,22 @@ non-authors is found, assume that all of the authors match."
     (notmuch-search-insert-authors format-string (plist-get result :authors)))
 
    ((string-equal field "tags")
-    ;; Ignore format-string here because notmuch-search-set-tags
-    ;; depends on the format of this
-    (insert (concat "(" (propertize
-			 (mapconcat 'identity (plist-get result :tags) " ")
-			 'font-lock-face 'notmuch-tag-face) ")")))))
+    (let ((tags-str (mapconcat 'identity (plist-get result :tags) " ")))
+      (insert (propertize (format format-string tags-str)
+			  'face 'notmuch-tag-face))))))
 
-(defun notmuch-search-show-result (result)
+(defun notmuch-search-show-result (result &optional pos)
+  "Insert RESULT at POS or the end of the buffer if POS is null."
   ;; Ignore excluded matches
   (unless (= (plist-get result :matched) 0)
-    (let ((beg (point-max)))
+    (let ((beg (or pos (point-max))))
       (save-excursion
 	(goto-char beg)
 	(dolist (spec notmuch-search-result-format)
 	  (notmuch-search-insert-field (car spec) (cdr spec) result))
 	(insert "\n")
 	(notmuch-search-color-line beg (point) (plist-get result :tags))
-	(put-text-property beg (point) 'notmuch-search-thread-id
-			   (concat "thread:" (plist-get result :thread)))
-	(put-text-property beg (point) 'notmuch-search-authors
-			   (plist-get result :authors))
-	(put-text-property beg (point) 'notmuch-search-subject
-			   (plist-get result :subject)))
+	(put-text-property beg (point) 'notmuch-search-result result))
       (when (string= (plist-get result :thread) notmuch-search-target-thread)
 	(setq notmuch-search-target-thread "found")
 	(goto-char beg)))))

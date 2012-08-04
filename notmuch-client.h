@@ -66,16 +66,14 @@ typedef GMimeCipherContext notmuch_crypto_context_t;
 #define STRINGIFY_(s) #s
 
 typedef struct mime_node mime_node_t;
+struct sprinter;
 struct notmuch_show_params;
 
 typedef struct notmuch_show_format {
-    const char *message_set_start;
-    notmuch_status_t (*part) (const void *ctx,
+    struct sprinter *(*new_sprinter) (const void *ctx, FILE *stream);
+    notmuch_status_t (*part) (const void *ctx, struct sprinter *sprinter,
 			      struct mime_node *node, int indent,
 			      const struct notmuch_show_params *params);
-    const char *message_set_sep;
-    const char *message_set_end;
-    const char *null_message;
 } notmuch_show_format_t;
 
 typedef struct notmuch_crypto {
@@ -87,6 +85,7 @@ typedef struct notmuch_crypto {
 typedef struct notmuch_show_params {
     notmuch_bool_t entire_thread;
     notmuch_bool_t omit_excluded;
+    notmuch_bool_t output_body;
     notmuch_bool_t raw;
     int part;
     notmuch_crypto_t crypto;
@@ -176,10 +175,12 @@ notmuch_status_t
 show_one_part (const char *filename, int part);
 
 void
-format_part_json (const void *ctx, mime_node_t *node, notmuch_bool_t first);
+format_part_json (const void *ctx, struct sprinter *sp, mime_node_t *node,
+		  notmuch_bool_t first, notmuch_bool_t output_body);
 
 void
-format_headers_json (const void *ctx, GMimeMessage *message, notmuch_bool_t reply);
+format_headers_json (struct sprinter *sp, GMimeMessage *message,
+		     notmuch_bool_t reply);
 
 typedef enum {
     NOTMUCH_SHOW_TEXT_PART_REPLY = 1 << 0,

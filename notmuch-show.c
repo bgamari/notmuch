@@ -20,41 +20,42 @@
 
 #include "notmuch-client.h"
 #include "gmime-filter-reply.h"
+#include "sprinter.h"
 
 static notmuch_status_t
-format_part_text (const void *ctx, mime_node_t *node,
+format_part_text (const void *ctx, sprinter_t *sp, mime_node_t *node,
 		  int indent, const notmuch_show_params_t *params);
 
 static const notmuch_show_format_t format_text = {
+    .new_sprinter = sprinter_text_create,
     .part = format_part_text,
 };
 
 static notmuch_status_t
-format_part_json_entry (const void *ctx, mime_node_t *node,
+format_part_json_entry (const void *ctx, sprinter_t *sp, mime_node_t *node,
 			int indent, const notmuch_show_params_t *params);
 
 static const notmuch_show_format_t format_json = {
-    .message_set_start = "[",
+    .new_sprinter = sprinter_json_create,
     .part = format_part_json_entry,
-    .message_set_sep = ", ",
-    .message_set_end = "]",
-    .null_message = "null"
 };
 
 static notmuch_status_t
-format_part_mbox (const void *ctx, mime_node_t *node,
+format_part_mbox (const void *ctx, sprinter_t *sp, mime_node_t *node,
 		  int indent, const notmuch_show_params_t *params);
 
 static const notmuch_show_format_t format_mbox = {
+    .new_sprinter = sprinter_text_create,
     .part = format_part_mbox,
 };
 
 static notmuch_status_t
-format_part_raw (unused (const void *ctx), mime_node_t *node,
+format_part_raw (unused (const void *ctx), sprinter_t *sp, mime_node_t *node,
 		 unused (int indent),
 		 unused (const notmuch_show_params_t *params));
 
 static const notmuch_show_format_t format_raw = {
+    .new_sprinter = sprinter_text_create,
     .part = format_part_raw,
 };
 
@@ -104,35 +105,45 @@ _get_one_line_summary (const void *ctx, notmuch_message_t *message)
 			    from, relative_date, tags);
 }
 
+/* Emit a sequence of key/value pairs for the metadata of message.
+ * The caller should begin a map before calling this. */
 static void
-format_message_json (const void *ctx, notmuch_message_t *message)
+format_message_json (sprinter_t *sp, notmuch_message_t *message)
 {
+    void *local = talloc_new (NULL);
     notmuch_tags_t *tags;
-    int first = 1;
-    void *ctx_quote = talloc_new (ctx);
     time_t date;
     const char *relative_date;
 
+    sp->map_key (sp, "id");
+    sp->string (sp, notmuch_message_get_message_id (message));
+
+    sp->map_key (sp, "match");
+    sp->boolean (sp, notmuch_message_get_flag (message, NOTMUCH_MESSAGE_FLAG_MATCH));
+
+    sp->map_key (sp, "excluded");
+    sp->boolean (sp, notmuch_message_get_flag (message, NOTMUCH_MESSAGE_FLAG_EXCLUDED));
+
+    sp->map_key (sp, "filename");
+    sp->string (sp, notmuch_message_get_filename (message));
+
+    sp->map_key (sp, "timestamp");
     date = notmuch_message_get_date (message);
-    relative_date = notmuch_time_relative_date (ctx, date);
+    sp->integer (sp, date);
 
-    printf ("\"id\": %s, \"match\": %s, \"excluded\": %s, \"filename\": %s, \"timestamp\": %ld, \"date_relative\": \"%s\", \"tags\": [",
-	    json_quote_str (ctx_quote, notmuch_message_get_message_id (message)),
-	    notmuch_message_get_flag (message, NOTMUCH_MESSAGE_FLAG_MATCH) ? "true" : "false",
-	    notmuch_message_get_flag (message, NOTMUCH_MESSAGE_FLAG_EXCLUDED) ? "true" : "false",
-	    json_quote_str (ctx_quote, notmuch_message_get_filename (message)),
-	    date, relative_date);
+    sp->map_key (sp, "date_relative");
+    relative_date = notmuch_time_relative_date (local, date);
+    sp->string (sp, relative_date);
 
+    sp->map_key (sp, "tags");
+    sp->begin_list (sp);
     for (tags = notmuch_message_get_tags (message);
 	 notmuch_tags_valid (tags);
 	 notmuch_tags_move_to_next (tags))
-    {
-         printf("%s%s", first ? "" : ",",
-               json_quote_str (ctx_quote, notmuch_tags_get (tags)));
-         first = 0;
-    }
-    printf("], ");
-    talloc_free (ctx_quote);
+	sp->string (sp, notmuch_tags_get (tags));
+    sp->end (sp);
+
+    talloc_free (local);
 }
 
 /* Extract just the email address from the contents of a From:
@@ -194,48 +205,46 @@ _is_from_line (const char *line)
 }
 
 void
-format_headers_json (const void *ctx, GMimeMessage *message, notmuch_bool_t reply)
+format_headers_json (sprinter_t *sp, GMimeMessage *message,
+		     notmuch_bool_t reply)
 {
-    void *local = talloc_new (ctx);
     InternetAddressList *recipients;
     const char *recipients_string;
 
-    printf ("{%s: %s",
-	    json_quote_str (local, "Subject"),
-	    json_quote_str (local, g_mime_message_get_subject (message)));
-    printf (", %s: %s",
-	    json_quote_str (local, "From"),
-	    json_quote_str (local, g_mime_message_get_sender (message)));
+    sp->begin_map (sp);
+
+    sp->map_key (sp, "Subject");
+    sp->string (sp, g_mime_message_get_subject (message));
+
+    sp->map_key (sp, "From");
+    sp->string (sp, g_mime_message_get_sender (message));
+
     recipients = g_mime_message_get_recipients (message, GMIME_RECIPIENT_TYPE_TO);
     recipients_string = internet_address_list_to_string (recipients, 0);
-    if (recipients_string)
-	printf (", %s: %s",
-		json_quote_str (local, "To"),
-		json_quote_str (local, recipients_string));
-    recipients = g_mime_message_get_recipients (message, GMIME_RECIPIENT_TYPE_CC);
-    recipients_string = internet_address_list_to_string (recipients, 0);
-    if (recipients_string)
-	printf (", %s: %s",
-		json_quote_str (local, "Cc"),
-		json_quote_str (local, recipients_string));
-
-    if (reply) {
-	printf (", %s: %s",
-		json_quote_str (local, "In-reply-to"),
-		json_quote_str (local, g_mime_object_get_header (GMIME_OBJECT (message), "In-reply-to")));
-
-	printf (", %s: %s",
-		json_quote_str (local, "References"),
-		json_quote_str (local, g_mime_object_get_header (GMIME_OBJECT (message), "References")));
-    } else {
-	printf (", %s: %s",
-		json_quote_str (local, "Date"),
-		json_quote_str (local, g_mime_message_get_date_as_string (message)));
+    if (recipients_string) {
+	sp->map_key (sp, "To");
+	sp->string (sp, recipients_string);
     }
 
-    printf ("}");
+    recipients = g_mime_message_get_recipients (message, GMIME_RECIPIENT_TYPE_CC);
+    recipients_string = internet_address_list_to_string (recipients, 0);
+    if (recipients_string) {
+	sp->map_key (sp, "Cc");
+	sp->string (sp, recipients_string);
+    }
 
-    talloc_free (local);
+    if (reply) {
+	sp->map_key (sp, "In-reply-to");
+	sp->string (sp, g_mime_object_get_header (GMIME_OBJECT (message), "In-reply-to"));
+
+	sp->map_key (sp, "References");
+	sp->string (sp, g_mime_object_get_header (GMIME_OBJECT (message), "References"));
+    } else {
+	sp->map_key (sp, "Date");
+	sp->string (sp, g_mime_message_get_date_as_string (message));
+    }
+
+    sp->end (sp);
 }
 
 /* Write a MIME text part out to the given stream.
@@ -334,139 +343,143 @@ signer_status_to_string (GMimeSignerStatus x)
 
 #ifdef GMIME_ATLEAST_26
 static void
-format_part_sigstatus_json (mime_node_t *node)
+format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
 {
     GMimeSignatureList *siglist = node->sig_list;
 
-    printf ("[");
+    sp->begin_list (sp);
 
     if (!siglist) {
-	printf ("]");
+	sp->end (sp);
 	return;
     }
 
-    void *ctx_quote = talloc_new (NULL);
     int i;
     for (i = 0; i < g_mime_signature_list_length (siglist); i++) {
 	GMimeSignature *signature = g_mime_signature_list_get_signature (siglist, i);
 
-	if (i > 0)
-	    printf (", ");
-
-	printf ("{");
+	sp->begin_map (sp);
 
 	/* status */
 	GMimeSignatureStatus status = g_mime_signature_get_status (signature);
-	printf ("\"status\": %s",
-		json_quote_str (ctx_quote,
-				signature_status_to_string (status)));
+	sp->map_key (sp, "status");
+	sp->string (sp, signature_status_to_string (status));
 
 	GMimeCertificate *certificate = g_mime_signature_get_certificate (signature);
 	if (status == GMIME_SIGNATURE_STATUS_GOOD) {
-	    if (certificate)
-		printf (", \"fingerprint\": %s", json_quote_str (ctx_quote, g_mime_certificate_get_fingerprint (certificate)));
+	    if (certificate) {
+		sp->map_key (sp, "fingerprint");
+		sp->string (sp, g_mime_certificate_get_fingerprint (certificate));
+	    }
 	    /* these dates are seconds since the epoch; should we
 	     * provide a more human-readable format string? */
 	    time_t created = g_mime_signature_get_created (signature);
-	    if (created != -1)
-		printf (", \"created\": %d", (int) created);
+	    if (created != -1) {
+		sp->map_key (sp, "created");
+		sp->integer (sp, created);
+	    }
 	    time_t expires = g_mime_signature_get_expires (signature);
-	    if (expires > 0)
-		printf (", \"expires\": %d", (int) expires);
+	    if (expires > 0) {
+		sp->map_key (sp, "expires");
+		sp->integer (sp, expires);
+	    }
 	    /* output user id only if validity is FULL or ULTIMATE. */
 	    /* note that gmime is using the term "trust" here, which
 	     * is WRONG.  It's actually user id "validity". */
 	    if (certificate) {
 		const char *name = g_mime_certificate_get_name (certificate);
 		GMimeCertificateTrust trust = g_mime_certificate_get_trust (certificate);
-		if (name && (trust == GMIME_CERTIFICATE_TRUST_FULLY || trust == GMIME_CERTIFICATE_TRUST_ULTIMATE))
-		    printf (", \"userid\": %s", json_quote_str (ctx_quote, name));
+		if (name && (trust == GMIME_CERTIFICATE_TRUST_FULLY || trust == GMIME_CERTIFICATE_TRUST_ULTIMATE)) {
+		    sp->map_key (sp, "userid");
+		    sp->string (sp, name);
+		}
 	    }
 	} else if (certificate) {
 	    const char *key_id = g_mime_certificate_get_key_id (certificate);
-	    if (key_id)
-		printf (", \"keyid\": %s", json_quote_str (ctx_quote, key_id));
+	    if (key_id) {
+		sp->map_key (sp, "keyid");
+		sp->string (sp, key_id);
+	    }
 	}
 
 	GMimeSignatureError errors = g_mime_signature_get_errors (signature);
 	if (errors != GMIME_SIGNATURE_ERROR_NONE) {
-	    printf (", \"errors\": %d", errors);
+	    sp->map_key (sp, "errors");
+	    sp->integer (sp, errors);
 	}
 
-	printf ("}");
+	sp->end (sp);
      }
 
-    printf ("]");
-
-    talloc_free (ctx_quote);
+    sp->end (sp);
 }
 #else
 static void
-format_part_sigstatus_json (mime_node_t *node)
+format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
 {
     const GMimeSignatureValidity* validity = node->sig_validity;
 
-    printf ("[");
+    sp->begin_list (sp);
 
     if (!validity) {
-	printf ("]");
+	sp->end (sp);
 	return;
     }
 
     const GMimeSigner *signer = g_mime_signature_validity_get_signers (validity);
-    int first = 1;
-    void *ctx_quote = talloc_new (NULL);
-
     while (signer) {
-	if (first)
-	    first = 0;
-	else
-	    printf (", ");
-
-	printf ("{");
+	sp->begin_map (sp);
 
 	/* status */
-	printf ("\"status\": %s",
-		json_quote_str (ctx_quote,
-				signer_status_to_string (signer->status)));
+	sp->map_key (sp, "status");
+	sp->string (sp, signer_status_to_string (signer->status));
 
 	if (signer->status == GMIME_SIGNER_STATUS_GOOD)
 	{
-	    if (signer->fingerprint)
-		printf (", \"fingerprint\": %s", json_quote_str (ctx_quote, signer->fingerprint));
+	    if (signer->fingerprint) {
+		sp->map_key (sp, "fingerprint");
+		sp->string (sp, signer->fingerprint);
+	    }
 	    /* these dates are seconds since the epoch; should we
 	     * provide a more human-readable format string? */
-	    if (signer->created)
-		printf (", \"created\": %d", (int) signer->created);
-	    if (signer->expires)
-		printf (", \"expires\": %d", (int) signer->expires);
+	    if (signer->created) {
+		sp->map_key (sp, "created");
+		sp->integer (sp, signer->created);
+	    }
+	    if (signer->expires) {
+		sp->map_key (sp, "expires");
+		sp->integer (sp, signer->expires);
+	    }
 	    /* output user id only if validity is FULL or ULTIMATE. */
 	    /* note that gmime is using the term "trust" here, which
 	     * is WRONG.  It's actually user id "validity". */
 	    if ((signer->name) && (signer->trust)) {
-		if ((signer->trust == GMIME_SIGNER_TRUST_FULLY) || (signer->trust == GMIME_SIGNER_TRUST_ULTIMATE))
-		    printf (", \"userid\": %s", json_quote_str (ctx_quote, signer->name));
+		if ((signer->trust == GMIME_SIGNER_TRUST_FULLY) || (signer->trust == GMIME_SIGNER_TRUST_ULTIMATE)) {
+		    sp->map_key (sp, "userid");
+		    sp->string (sp, signer->name);
+		}
            }
        } else {
-           if (signer->keyid)
-               printf (", \"keyid\": %s", json_quote_str (ctx_quote, signer->keyid));
+           if (signer->keyid) {
+	       sp->map_key (sp, "keyid");
+	       sp->string (sp, signer->keyid);
+	   }
        }
        if (signer->errors != GMIME_SIGNER_ERROR_NONE) {
-           printf (", \"errors\": %d", signer->errors);
+	   sp->map_key (sp, "errors");
+	   sp->integer (sp, signer->errors);
        }
 
-       printf ("}");
+       sp->end (sp);
        signer = signer->next;
     }
 
-    printf ("]");
-
-    talloc_free (ctx_quote);
+    sp->end (sp);
 }
 #endif
 
 static notmuch_status_t
-format_part_text (const void *ctx, mime_node_t *node,
+format_part_text (const void *ctx, sprinter_t *sp, mime_node_t *node,
 		  int indent, const notmuch_show_params_t *params)
 {
     /* The disposition and content-type metadata are associated with
@@ -548,7 +561,7 @@ format_part_text (const void *ctx, mime_node_t *node,
     }
 
     for (i = 0; i < node->nchildren; i++)
-	format_part_text (ctx, mime_node_child (node, i), indent, params);
+	format_part_text (ctx, sp, mime_node_child (node, i), indent, params);
 
     if (GMIME_IS_MESSAGE (node->part))
 	printf ("\fbody}\n");
@@ -559,26 +572,29 @@ format_part_text (const void *ctx, mime_node_t *node,
 }
 
 void
-format_part_json (const void *ctx, mime_node_t *node, notmuch_bool_t first)
+format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
+		  notmuch_bool_t first, notmuch_bool_t output_body)
 {
     /* Any changes to the JSON format should be reflected in the file
      * devel/schemata. */
 
     if (node->envelope_file) {
-	printf ("{");
-	format_message_json (ctx, node->envelope_file);
+	sp->begin_map (sp);
+	format_message_json (sp, node->envelope_file);
 
-	printf ("\"headers\": ");
-	format_headers_json (ctx, GMIME_MESSAGE (node->part), FALSE);
+	sp->map_key (sp, "headers");
+	format_headers_json (sp, GMIME_MESSAGE (node->part), FALSE);
 
-	printf (", \"body\": [");
-	format_part_json (ctx, mime_node_child (node, 0), first);
-
-	printf ("]}");
+	if (output_body) {
+	    sp->map_key (sp, "body");
+	    sp->begin_list (sp);
+	    format_part_json (ctx, sp, mime_node_child (node, 0), first, TRUE);
+	    sp->end (sp);
+	}
+	sp->end (sp);
 	return;
     }
 
-    void *local = talloc_new (ctx);
     /* The disposition and content-type metadata are associated with
      * the envelope for message parts */
     GMimeObject *meta = node->envelope_part ?
@@ -587,31 +603,41 @@ format_part_json (const void *ctx, mime_node_t *node, notmuch_bool_t first)
     const char *cid = g_mime_object_get_content_id (meta);
     const char *filename = GMIME_IS_PART (node->part) ?
 	g_mime_part_get_filename (GMIME_PART (node->part)) : NULL;
-    const char *terminator = "";
+    int nclose = 0;
     int i;
 
-    if (!first)
-	printf (", ");
+    sp->begin_map (sp);
 
-    printf ("{\"id\": %d", node->part_num);
+    sp->map_key (sp, "id");
+    sp->integer (sp, node->part_num);
 
-    if (node->decrypt_attempted)
-	printf (", \"encstatus\": [{\"status\": \"%s\"}]",
-		node->decrypt_success ? "good" : "bad");
-
-    if (node->verify_attempted) {
-	printf (", \"sigstatus\": ");
-	format_part_sigstatus_json (node);
+    if (node->decrypt_attempted) {
+	sp->map_key (sp, "encstatus");
+	sp->begin_list (sp);
+	sp->begin_map (sp);
+	sp->map_key (sp, "status");
+	sp->string (sp, node->decrypt_success ? "good" : "bad");
+	sp->end (sp);
+	sp->end (sp);
     }
 
-    printf (", \"content-type\": %s",
-	    json_quote_str (local, g_mime_content_type_to_string (content_type)));
+    if (node->verify_attempted) {
+	sp->map_key (sp, "sigstatus");
+	format_part_sigstatus_json (sp, node);
+    }
 
-    if (cid)
-	printf (", \"content-id\": %s", json_quote_str (local, cid));
+    sp->map_key (sp, "content-type");
+    sp->string (sp, g_mime_content_type_to_string (content_type));
 
-    if (filename)
-	printf (", \"filename\": %s", json_quote_str (local, filename));
+    if (cid) {
+	sp->map_key (sp, "content-id");
+	sp->string (sp, cid);
+    }
+
+    if (filename) {
+	sp->map_key (sp, "filename");
+	sp->string (sp, filename);
+    }
 
     if (GMIME_IS_PART (node->part)) {
 	/* For non-HTML text parts, we include the content in the
@@ -626,42 +652,52 @@ format_part_json (const void *ctx, mime_node_t *node, notmuch_bool_t first)
 	if (g_mime_content_type_is_type (content_type, "text", "html")) {
 	    const char *content_charset = g_mime_object_get_content_type_parameter (meta, "charset");
 
-	    if (content_charset != NULL)
-		printf (", \"content-charset\": %s", json_quote_str (local, content_charset));
+	    if (content_charset != NULL) {
+		sp->map_key (sp, "content-charset");
+		sp->string (sp, content_charset);
+	    }
 	} else if (g_mime_content_type_is_type (content_type, "text", "*")) {
 	    GMimeStream *stream_memory = g_mime_stream_mem_new ();
 	    GByteArray *part_content;
 	    show_text_part_content (node->part, stream_memory, 0);
 	    part_content = g_mime_stream_mem_get_byte_array (GMIME_STREAM_MEM (stream_memory));
-
-	    printf (", \"content\": %s", json_quote_chararray (local, (char *) part_content->data, part_content->len));
+	    sp->map_key (sp, "content");
+	    sp->string_len (sp, (char *) part_content->data, part_content->len);
 	    g_object_unref (stream_memory);
 	}
     } else if (GMIME_IS_MULTIPART (node->part)) {
-	printf (", \"content\": [");
-	terminator = "]";
+	sp->map_key (sp, "content");
+	sp->begin_list (sp);
+	nclose = 1;
     } else if (GMIME_IS_MESSAGE (node->part)) {
-	printf (", \"content\": [{");
-	printf ("\"headers\": ");
-	format_headers_json (local, GMIME_MESSAGE (node->part), FALSE);
+	sp->map_key (sp, "content");
+	sp->begin_list (sp);
+	sp->begin_map (sp);
 
-	printf (", \"body\": [");
-	terminator = "]}]";
+	sp->map_key (sp, "headers");
+	format_headers_json (sp, GMIME_MESSAGE (node->part), FALSE);
+
+	sp->map_key (sp, "body");
+	sp->begin_list (sp);
+	nclose = 3;
     }
 
-    talloc_free (local);
-
     for (i = 0; i < node->nchildren; i++)
-	format_part_json (ctx, mime_node_child (node, i), i == 0);
+	format_part_json (ctx, sp, mime_node_child (node, i), i == 0, TRUE);
 
-    printf ("%s}", terminator);
+    /* Close content structures */
+    for (i = 0; i < nclose; i++)
+	sp->end (sp);
+    /* Close part map */
+    sp->end (sp);
 }
 
 static notmuch_status_t
-format_part_json_entry (const void *ctx, mime_node_t *node, unused (int indent),
-			unused (const notmuch_show_params_t *params))
+format_part_json_entry (const void *ctx, sprinter_t *sp,
+			mime_node_t *node, unused (int indent),
+			const notmuch_show_params_t *params)
 {
-    format_part_json (ctx, node, TRUE);
+    format_part_json (ctx, sp, node, TRUE, params->output_body);
 
     return NOTMUCH_STATUS_SUCCESS;
 }
@@ -672,7 +708,8 @@ format_part_json_entry (const void *ctx, mime_node_t *node, unused (int indent),
  * http://qmail.org/qmail-manual-html/man5/mbox.html
  */
 static notmuch_status_t
-format_part_mbox (const void *ctx, mime_node_t *node, unused (int indent),
+format_part_mbox (const void *ctx, unused (sprinter_t *sp), mime_node_t *node,
+		  unused (int indent),
 		  unused (const notmuch_show_params_t *params))
 {
     notmuch_message_t *message = node->envelope_file;
@@ -723,8 +760,8 @@ format_part_mbox (const void *ctx, mime_node_t *node, unused (int indent),
 }
 
 static notmuch_status_t
-format_part_raw (unused (const void *ctx), mime_node_t *node,
-		 unused (int indent),
+format_part_raw (unused (const void *ctx), unused (sprinter_t *sp),
+		 mime_node_t *node, unused (int indent),
 		 unused (const notmuch_show_params_t *params))
 {
     if (node->envelope_file) {
@@ -801,17 +838,9 @@ format_part_raw (unused (const void *ctx), mime_node_t *node,
 }
 
 static notmuch_status_t
-show_null_message (const notmuch_show_format_t *format)
-{
-    /* Output a null message. Currently empty for all formats except Json */
-    if (format->null_message)
-	printf ("%s", format->null_message);
-    return NOTMUCH_STATUS_SUCCESS;
-}
-
-static notmuch_status_t
 show_message (void *ctx,
 	      const notmuch_show_format_t *format,
+	      sprinter_t *sp,
 	      notmuch_message_t *message,
 	      int indent,
 	      notmuch_show_params_t *params)
@@ -825,7 +854,7 @@ show_message (void *ctx,
 	goto DONE;
     part = mime_node_seek_dfs (root, (params->part < 0 ? 0 : params->part));
     if (part)
-	status = format->part (local, part, indent, params);
+	status = format->part (local, sp, part, indent, params);
   DONE:
     talloc_free (local);
     return status;
@@ -834,6 +863,7 @@ show_message (void *ctx,
 static notmuch_status_t
 show_messages (void *ctx,
 	       const notmuch_show_format_t *format,
+	       sprinter_t *sp,
 	       notmuch_messages_t *messages,
 	       int indent,
 	       notmuch_show_params_t *params)
@@ -841,23 +871,16 @@ show_messages (void *ctx,
     notmuch_message_t *message;
     notmuch_bool_t match;
     notmuch_bool_t excluded;
-    int first_set = 1;
     int next_indent;
     notmuch_status_t status, res = NOTMUCH_STATUS_SUCCESS;
 
-    if (format->message_set_start)
-	fputs (format->message_set_start, stdout);
+    sp->begin_list (sp);
 
     for (;
 	 notmuch_messages_valid (messages);
 	 notmuch_messages_move_to_next (messages))
     {
-	if (!first_set && format->message_set_sep)
-	    fputs (format->message_set_sep, stdout);
-	first_set = 0;
-
-	if (format->message_set_start)
-	    fputs (format->message_set_start, stdout);
+	sp->begin_list (sp);
 
 	message = notmuch_messages_get (messages);
 
@@ -867,19 +890,16 @@ show_messages (void *ctx,
 	next_indent = indent;
 
 	if ((match && (!excluded || !params->omit_excluded)) || params->entire_thread) {
-	    status = show_message (ctx, format, message, indent, params);
+	    status = show_message (ctx, format, sp, message, indent, params);
 	    if (status && !res)
 		res = status;
 	    next_indent = indent + 1;
 	} else {
-	    status = show_null_message (format);
+	    sp->null (sp);
 	}
 
-	if (!status && format->message_set_sep)
-	    fputs (format->message_set_sep, stdout);
-
 	status = show_messages (ctx,
-				format,
+				format, sp,
 				notmuch_message_get_replies (message),
 				next_indent,
 				params);
@@ -888,12 +908,10 @@ show_messages (void *ctx,
 
 	notmuch_message_destroy (message);
 
-	if (format->message_set_end)
-	    fputs (format->message_set_end, stdout);
+	sp->end (sp);
     }
 
-    if (format->message_set_end)
-	fputs (format->message_set_end, stdout);
+    sp->end (sp);
 
     return res;
 }
@@ -903,6 +921,7 @@ static int
 do_show_single (void *ctx,
 		notmuch_query_t *query,
 		const notmuch_show_format_t *format,
+		sprinter_t *sp,
 		notmuch_show_params_t *params)
 {
     notmuch_messages_t *messages;
@@ -923,7 +942,8 @@ do_show_single (void *ctx,
 
     notmuch_message_set_flag (message, NOTMUCH_MESSAGE_FLAG_MATCH, 1);
 
-    return show_message (ctx, format, message, 0, params) != NOTMUCH_STATUS_SUCCESS;
+    return show_message (ctx, format, sp, message, 0, params)
+	!= NOTMUCH_STATUS_SUCCESS;
 }
 
 /* Formatted output of threads */
@@ -931,16 +951,15 @@ static int
 do_show (void *ctx,
 	 notmuch_query_t *query,
 	 const notmuch_show_format_t *format,
+	 sprinter_t *sp,
 	 notmuch_show_params_t *params)
 {
     notmuch_threads_t *threads;
     notmuch_thread_t *thread;
     notmuch_messages_t *messages;
-    int first_toplevel = 1;
     notmuch_status_t status, res = NOTMUCH_STATUS_SUCCESS;
 
-    if (format->message_set_start)
-	fputs (format->message_set_start, stdout);
+    sp->begin_list (sp);
 
     for (threads = notmuch_query_search_threads (query);
 	 notmuch_threads_valid (threads);
@@ -954,11 +973,7 @@ do_show (void *ctx,
 	    INTERNAL_ERROR ("Thread %s has no toplevel messages.\n",
 			    notmuch_thread_get_thread_id (thread));
 
-	if (!first_toplevel && format->message_set_sep)
-	    fputs (format->message_set_sep, stdout);
-	first_toplevel = 0;
-
-	status = show_messages (ctx, format, messages, 0, params);
+	status = show_messages (ctx, format, sp, messages, 0, params);
 	if (status && !res)
 	    res = status;
 
@@ -966,8 +981,7 @@ do_show (void *ctx,
 
     }
 
-    if (format->message_set_end)
-	fputs (format->message_set_end, stdout);
+    sp->end (sp);
 
     return res != NOTMUCH_STATUS_SUCCESS;
 }
@@ -1001,9 +1015,11 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     char *query_string;
     int opt_index, ret;
     const notmuch_show_format_t *format = &format_text;
+    sprinter_t *sprinter;
     notmuch_show_params_t params = {
 	.part = -1,
 	.omit_excluded = TRUE,
+	.output_body = TRUE,
 	.crypto = {
 	    .verify = FALSE,
 	    .decrypt = FALSE
@@ -1032,6 +1048,7 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	{ NOTMUCH_OPT_INT, &params.part, "part", 'p', 0 },
 	{ NOTMUCH_OPT_BOOLEAN, &params.crypto.decrypt, "decrypt", 'd', 0 },
 	{ NOTMUCH_OPT_BOOLEAN, &params.crypto.verify, "verify", 'v', 0 },
+	{ NOTMUCH_OPT_BOOLEAN, &params.output_body, "body", 'b', 0 },
 	{ 0, 0, 0, 0, 0 }
     };
 
@@ -1086,6 +1103,16 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	    entire_thread = ENTIRE_THREAD_FALSE;
     }
 
+    if (!params.output_body) {
+	if (params.part > 0) {
+	    fprintf (stderr, "Warning: --body=false is incompatible with --part > 0. Disabling.\n");
+	    params.output_body = TRUE;
+	} else {
+	    if (format != &format_json)
+		fprintf (stderr, "Warning: --body=false only implemented for format=json\n");
+	}
+    }
+
     if (entire_thread == ENTIRE_THREAD_TRUE)
 	params.entire_thread = TRUE;
     else
@@ -1116,9 +1143,12 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	return 1;
     }
 
+    /* Create structure printer. */
+    sprinter = format->new_sprinter(ctx, stdout);
+
     /* If a single message is requested we do not use search_excludes. */
     if (params.part >= 0)
-	ret = do_show_single (ctx, query, format, &params);
+	ret = do_show_single (ctx, query, format, sprinter, &params);
     else {
 	/* We always apply set the exclude flag. The
 	 * exclude=true|false option controls whether or not we return
@@ -1137,7 +1167,7 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	    params.omit_excluded = FALSE;
 	}
 
-	ret = do_show (ctx, query, format, &params);
+	ret = do_show (ctx, query, format, sprinter, &params);
     }
 
     notmuch_crypto_cleanup (&params.crypto);
