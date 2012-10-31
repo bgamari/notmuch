@@ -47,8 +47,8 @@
 
 For an open message, all of these headers will be made visible
 according to `notmuch-message-headers-visible' or can be toggled
-with `notmuch-show-toggle-headers'. For a closed message, only
-the first header in the list will be visible."
+with `notmuch-show-toggle-visibility-headers'. For a closed message,
+only the first header in the list will be visible."
   :type '(repeat string)
   :group 'notmuch-show)
 
@@ -58,8 +58,8 @@ the first header in the list will be visible."
 If this value is non-nil, then all of the headers defined in
 `notmuch-message-headers' will be visible by default in the display
 of each message. Otherwise, these headers will be hidden and
-`notmuch-show-toggle-headers' can be used to make the visible for
-any given message."
+`notmuch-show-toggle-visibility-headers' can be used to make them
+visible for any given message."
   :type 'boolean
   :group 'notmuch-show)
 
@@ -182,6 +182,20 @@ provided with an MLA argument nor `completing-read' input."
 	       (list 'const :tag (car mla) :value (car mla)))
 	     notmuch-show-stash-mlarchive-link-alist))
   :group 'notmuch-show)
+
+(defcustom notmuch-show-mark-read-tags '("-unread")
+  "List of tag changes to apply to a message when it is marked as read.
+
+Tags starting with \"+\" (or not starting with either \"+\" or
+\"-\") in the list will be added, and tags starting with \"-\"
+will be removed from the message being marked as read.
+
+For example, if you wanted to remove an \"unread\" tag and add a
+\"read\" tag (which would make little sense), you would set:
+    (\"-unread\" \"+read\")"
+  :type '(repeat string)
+  :group 'notmuch-show)
+
 
 (defmacro with-current-notmuch-show-message (&rest body)
   "Evaluate body with current buffer set to the text of current message"
@@ -1031,7 +1045,8 @@ function is used."
 	  notmuch-show-parent-buffer parent-buffer
 	  notmuch-show-query-context query-context)
     (notmuch-show-build-buffer)
-    (notmuch-show-goto-first-wanted-message)))
+    (notmuch-show-goto-first-wanted-message)
+    (current-buffer)))
 
 (defun notmuch-show-build-buffer ()
   (let ((inhibit-read-only t))
@@ -1062,10 +1077,10 @@ function is used."
 
       (jit-lock-register #'notmuch-show-buttonise-links)
 
-      (run-hooks 'notmuch-show-hook))
+      ;; Set the header line to the subject of the first message.
+      (setq header-line-format (notmuch-show-strip-re (notmuch-show-get-subject)))
 
-    ;; Set the header line to the subject of the first message.
-    (setq header-line-format (notmuch-show-strip-re (notmuch-show-get-subject)))))
+      (run-hooks 'notmuch-show-hook))))
 
 (defun notmuch-show-capture-state ()
   "Capture the state of the current buffer.
@@ -1155,7 +1170,7 @@ reset based on the original query."
 	(define-key map "v" 'notmuch-show-view-all-mime-parts)
 	(define-key map "c" 'notmuch-show-stash-map)
 	(define-key map "=" 'notmuch-show-refresh-view)
-	(define-key map "h" 'notmuch-show-toggle-headers)
+	(define-key map "h" 'notmuch-show-toggle-visibility-headers)
 	(define-key map "*" 'notmuch-show-tag-all)
 	(define-key map "-" 'notmuch-show-remove-tag)
 	(define-key map "+" 'notmuch-show-add-tag)
@@ -1382,10 +1397,18 @@ current thread."
   "Are the headers of the current message visible?"
   (notmuch-show-get-prop :headers-visible))
 
-(defun notmuch-show-mark-read ()
-  "Mark the current message as read."
-  (notmuch-show-tag-message "-unread")
-  (notmuch-show-tag-message "-unseen"))
+(defun notmuch-show-mark-read (&optional unread)
+  "Mark the current message as read.
+
+Mark the current message as read by applying the tag changes in
+`notmuch-show-mark-read-tags' to it (remove the \"unread\" tag by
+default). If a prefix argument is given, the message will be
+marked as unread, i.e. the tag changes in
+`notmuch-show-mark-read-tags' will be reversed."
+  (interactive "P")
+  (when notmuch-show-mark-read-tags
+    (apply 'notmuch-show-tag-message
+	   (notmuch-tag-change-list notmuch-show-mark-read-tags unread))))
 
 ;; Functions for getting attributes of several messages in the current
 ;; thread.
@@ -1526,9 +1549,11 @@ thread, navigate to the next thread in the parent search buffer."
       (goto-char (point-max)))))
 
 (defun notmuch-show-previous-message ()
-  "Show the previous message."
+  "Show the previous message or the start of the current message."
   (interactive)
-  (notmuch-show-goto-message-previous)
+  (if (= (point) (notmuch-show-message-top))
+      (notmuch-show-goto-message-previous)
+    (notmuch-show-move-to-message-top))
   (notmuch-show-mark-read)
   (notmuch-show-message-adjust))
 
@@ -1588,7 +1613,9 @@ to show, nil otherwise."
 (defun notmuch-show-previous-open-message ()
   "Show the previous open message."
   (interactive)
-  (while (and (notmuch-show-goto-message-previous)
+  (while (and (if (= (point) (notmuch-show-message-top))
+		  (notmuch-show-goto-message-previous)
+		(notmuch-show-move-to-message-top))
 	      (not (notmuch-show-message-visible-p))))
   (notmuch-show-mark-read)
   (notmuch-show-message-adjust))
@@ -1682,7 +1709,7 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
   (interactive)
   (notmuch-show-tag "-"))
 
-(defun notmuch-show-toggle-headers ()
+(defun notmuch-show-toggle-visibility-headers ()
   "Toggle the visibility of the current message headers."
   (interactive)
   (let ((props (notmuch-show-get-message-properties)))
@@ -1736,18 +1763,20 @@ argument, hide all of the messages."
 (defun notmuch-show-archive-thread (&optional unarchive)
   "Archive each message in thread.
 
-Archive each message currently shown by removing the \"inbox\"
-tag from each.  If a prefix argument is given, the messages will
-be \"unarchived\" (ie. the \"inbox\" tag will be added instead of
-removed).
+Archive each message currently shown by applying the tag changes
+in `notmuch-archive-tags' to each (remove the \"inbox\" tag by
+default). If a prefix argument is given, the messages will be
+\"unarchived\", i.e. the tag changes in `notmuch-archive-tags'
+will be reversed.
 
 Note: This command is safe from any race condition of new messages
 being delivered to the same thread. It does not archive the
 entire thread, but only the messages shown in the current
 buffer."
   (interactive "P")
-  (let ((op (if unarchive "+" "-")))
-    (notmuch-show-tag-all (concat op "inbox"))))
+  (when notmuch-archive-tags
+    (notmuch-show-tag-all
+     (notmuch-tag-change-list notmuch-archive-tags unarchive))))
 
 (defun notmuch-show-archive-thread-then-next ()
   "Archive all messages in the current buffer, then show next thread from search."
@@ -1762,14 +1791,17 @@ buffer."
   (notmuch-show-next-thread))
 
 (defun notmuch-show-archive-message (&optional unarchive)
-  "Archive the current message (remove \"inbox\" tag).
+  "Archive the current message.
 
-If a prefix argument is given, the message will be
-\"unarchived\" (ie. the \"inbox\" tag will be added instead of
-removed)."
+Archive the current message by applying the tag changes in
+`notmuch-archive-tags' to it (remove the \"inbox\" tag by
+default). If a prefix argument is given, the message will be
+\"unarchived\", i.e. the tag changes in `notmuch-archive-tags'
+will be reversed."
   (interactive "P")
-  (let ((op (if unarchive "+" "-")))
-    (notmuch-show-tag-message (concat op "inbox"))))
+  (when notmuch-archive-tags
+    (apply 'notmuch-show-tag-message
+	   (notmuch-tag-change-list notmuch-archive-tags unarchive))))
 
 (defun notmuch-show-archive-message-then-next-or-exit ()
   "Archive the current message, then show the next open message in the current thread.

@@ -350,6 +350,11 @@ ${additional_headers}"
 ${additional_headers}"
     fi
 
+    if [ ! -z "${template[bcc]}" ]; then
+	additional_headers="Bcc: ${template[bcc]}
+${additional_headers}"
+    fi
+
     if [ ! -z "${template[references]}" ]; then
 	additional_headers="References: ${template[references]}
 ${additional_headers}"
@@ -403,8 +408,11 @@ emacs_deliver_message ()
     shift 2
     # before we can send a message, we have to prepare the FCC maildir
     mkdir -p "$MAIL_DIR"/sent/{cur,new,tmp}
-    $TEST_DIRECTORY/smtp-dummy sent_message &
-    smtp_dummy_pid=$!
+    # eval'ing smtp-dummy --background will set smtp_dummy_pid
+    smtp_dummy_pid=
+    eval `$TEST_DIRECTORY/smtp-dummy --background sent_message`
+    test -n "$smtp_dummy_pid" || return 1
+
     test_emacs \
 	"(let ((message-send-mail-function 'message-smtpmail-send-it)
 	       (smtpmail-smtp-server \"localhost\")
@@ -419,9 +427,11 @@ emacs_deliver_message ()
 	   (insert \"${body}\")
 	   $@
 	   (message-send-and-exit))"
-    # opportunistically quit smtp-dummy in case above fails.
-    { echo QUIT > /dev/tcp/localhost/25025; } 2>/dev/null
-    wait ${smtp_dummy_pid}
+
+    # In case message was sent properly, client waits for confirmation
+    # before exiting and resuming control here; therefore making sure
+    # that server exits by sending (KILL) signal to it is safe.
+    kill -9 $smtp_dummy_pid
     notmuch new >/dev/null
 }
 
@@ -497,17 +507,19 @@ test_expect_equal_file ()
 	test "$#" = 2 ||
 	error "bug in the test script: not 2 or 3 parameters to test_expect_equal"
 
-	output="$1"
-	expected="$2"
+	file1="$1"
+	basename1=`basename "$file1"`
+	file2="$2"
+	basename2=`basename "$file2"`
 	if ! test_skip "$test_subtest_name"
 	then
-		if diff -q "$expected" "$output" >/dev/null ; then
+		if diff -q "$file1" "$file2" >/dev/null ; then
 			test_ok_ "$test_subtest_name"
 		else
 			testname=$this_test.$test_count
-			cp "$output" $testname.output
-			cp "$expected" $testname.expected
-			test_failure_ "$test_subtest_name" "$(diff -u $testname.expected $testname.output)"
+			cp "$file1" "$testname.$basename1"
+			cp "$file2" "$testname.$basename2"
+			test_failure_ "$test_subtest_name" "$(diff -u "$testname.$basename1" "$testname.$basename2")"
 		fi
     fi
 }
@@ -553,7 +565,7 @@ test_emacs_expect_t () {
 
 NOTMUCH_NEW ()
 {
-    notmuch new | grep -v -E -e '^Processed [0-9]*( total)? file|Found [0-9]* total file'
+    notmuch new "${@}" | grep -v -E -e '^Processed [0-9]*( total)? file|Found [0-9]* total file'
 }
 
 notmuch_search_sanitize ()
@@ -985,6 +997,14 @@ test_emacs () {
 		done
 	fi
 
+	# Clear test-output output file.  Most Emacs tests end with a
+	# call to (test-output).  If the test code fails with an
+	# exception before this call, the output file won't get
+	# updated.  Since we don't want to compare against an output
+	# file from another test, so start out with an empty file.
+	rm -f OUTPUT
+	touch OUTPUT
+
 	emacsclient --socket-name="$EMACS_SERVER" --eval "(progn $@)"
 }
 
@@ -1070,6 +1090,7 @@ find_notmuch_path ()
 # Test the binaries we have just built.  The tests are kept in
 # test/ subdirectory and are run in 'trash directory' subdirectory.
 TEST_DIRECTORY=$(pwd)
+notmuch_path=`find_notmuch_path "$TEST_DIRECTORY"`
 if test -n "$valgrind"
 then
 	make_symlink () {
@@ -1130,11 +1151,15 @@ then
 	PATH=$GIT_VALGRIND/bin:$PATH
 	GIT_EXEC_PATH=$GIT_VALGRIND/bin
 	export GIT_VALGRIND
+	test -n "$notmuch_path" && MANPATH="$notmuch_path/man:$MANPATH"
 else # normal case
-	notmuch_path=`find_notmuch_path "$TEST_DIRECTORY"`
-	test -n "$notmuch_path" && PATH="$notmuch_path:$PATH"
+	if test -n "$notmuch_path"
+		then
+			PATH="$notmuch_path:$PATH"
+			MANPATH="$notmuch_path/man:$MANPATH"
+		fi
 fi
-export PATH
+export PATH MANPATH
 
 # Test repository
 test="tmp.$(basename "$0" .sh)"

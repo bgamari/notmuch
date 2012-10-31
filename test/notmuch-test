@@ -59,6 +59,9 @@ TESTS="
   emacs-address-cleaning
   emacs-hello
   emacs-show
+  missing-headers
+  parse-time-string
+  search-date
 "
 TESTS=${NOTMUCH_TESTS:=$TESTS}
 

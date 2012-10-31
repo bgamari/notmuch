@@ -374,6 +374,14 @@ elif [ $uname = "SunOS" ] ; then
     printf "Solaris.\n"
     platform=SOLARIS
     linker_resolves_library_dependencies=0
+elif [ $uname = "FreeBSD" ] ; then
+    printf "FreeBSD.\n"
+    platform=FREEBSD
+    linker_resolves_library_dependencies=0
+elif [ $uname = "OpenBSD" ] ; then
+    printf "OpenBSD.\n"
+    platform=OPENBSD
+    linker_resolves_library_dependencies=0
 elif [ $uname = "Linux" ] || [ $uname = "GNU" ] ; then
     printf "$uname\n"
     platform="$uname"
@@ -528,7 +536,7 @@ fi
 
 WARN_CXXFLAGS=""
 printf "Checking for available C++ compiler warning flags... "
-for flag in -Wall -Wextra -Wwrite-strings -Wswitch-enum; do
+for flag in -Wall -Wextra -Wwrite-strings; do
     if ${CC} $flag -o minimal minimal.c > /dev/null 2>&1
     then
 	WARN_CXXFLAGS="${WARN_CXXFLAGS}${WARN_CXXFLAGS:+ }${flag}"
@@ -663,7 +671,7 @@ HAVE_GETLINE = ${have_getline}
 # build its own version)
 HAVE_STRCASESTR = ${have_strcasestr}
 
-# Supported platforms (so far) are: LINUX, MACOSX, SOLARIS
+# Supported platforms (so far) are: LINUX, MACOSX, SOLARIS, FREEBSD, OPENBSD
 PLATFORM = ${platform}
 
 # Whether the linker will automatically resolve the dependency of one

@@ -1,4 +1,30 @@
-Notmuch 0.14 (xxxx-xx-xx)
+Notmuch 0.15 (YYYY-MM-DD)
+=========================
+
+Command-Line Interface
+----------------------
+
+Empty tag names and tags beginning with "-" are deprecated
+
+  Such tags have been a frequent source of confusion and cause
+  (sometimes unresolvable) conflicts with other syntax.  notmuch tag
+  no longer allows such tags to be added to messages.  Removing such
+  tags continues to be supported to allow cleanup of existing tags,
+  but may be removed in a future release.
+
+Library changes
+---------------
+
+Date range search support
+
+  The `date:` prefix can now be used in queries to restrict the results
+  to only messages within a particular time range (based on the Date:
+  header) with a range syntax of `date:<since>..<until>`. Notmuch
+  supports a wide variety of expressions in `<since>` and
+  `<until>`. Please refer to the `notmuch-search-terms(7)` manual page
+  for details.
+
+Notmuch 0.14 (2012-08-20)
 =========================
 
 General bug fixes
@@ -41,6 +67,14 @@ Experimental support for multi-line search result formats
   `notmuch-search-result-format` to make individual search results
   span multiple lines.
 
+Next/previous in search and show now move by boundaries
+
+  All "next" and "previous" commands in the search and show modes now
+  move to the next/previous result or message boundary.  This doesn't
+  change the behavior of "next", but "previous" commands will first
+  move to the beginning of the current result or message if point is
+  inside the result or message.
+
 Search now uses the JSON format internally
 
   This should address problems with unusual characters in authors and
@@ -55,13 +89,16 @@ user-specified formatting
   you've customized this variable, you may have to change your date
   format from `"%s "` to `"%12s "`.
 
+The thread-id for the `target-thread` argument for `notmuch-search` should
+now be supplied without the "thread:" prefix.
+
 Notmuch 0.13.2 (2012-06-02)
 ===========================
 
 Bug-fix release
 ---------------
 
-Update contrib/notmuch-deliver for API changes in 0.13. This fixes a
+Update `contrib/notmuch-deliver` for API changes in 0.13. This fixes a
 compilation error for this contrib package.
 
 Notmuch 0.13.1 (2012-05-29)
@@ -87,7 +124,7 @@ databases
   and simply return a `NULL` object if the directory does not exist,
   as documented.
 
-Fix compilation of ruby bindings.
+Fix compilation of ruby bindings
 
   Revert to dynamic linking, since the statically linked bindings did
   not work well.

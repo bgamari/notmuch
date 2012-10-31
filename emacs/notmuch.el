@@ -388,8 +388,9 @@ any tags).
 Pressing \\[notmuch-search-show-thread] on any line displays that thread. The '\\[notmuch-search-add-tag]' and '\\[notmuch-search-remove-tag]'
 keys can be used to add or remove tags from a thread. The '\\[notmuch-search-archive-thread]' key
 is a convenience for archiving a thread (removing the \"inbox\"
-tag). The '\\[notmuch-search-tag-all]' key can be used to add or remove a tag from all
-threads in the current buffer.
+tag). The '\\[notmuch-search-tag-all]' key can be used to add and/or remove tags from all
+messages (as opposed to threads) that match the current query.  Use with caution, as this
+will also tag matching messages that arrived *after* constructing the buffer.
 
 Other useful commands are '\\[notmuch-search-filter]' for filtering the current search
 based on an additional query string, '\\[notmuch-search-filter-by-tag]' for filtering to include
@@ -475,10 +476,12 @@ BEG."
 	(push (plist-get (notmuch-search-get-result pos) property) output)))
     output))
 
-(defun notmuch-search-find-thread-id ()
-  "Return the thread for the current thread"
+(defun notmuch-search-find-thread-id (&optional bare)
+  "Return the thread for the current thread
+
+If BARE is set then do not prefix with \"thread:\""
   (let ((thread (plist-get (notmuch-search-get-result) :thread)))
-    (when thread (concat "thread:" thread))))
+    (when thread (concat (unless bare "thread:") thread))))
 
 (defun notmuch-search-find-thread-id-region (beg end)
   "Return a list of threads for the current region"
@@ -590,13 +593,20 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
   (interactive)
   (notmuch-search-tag "-"))
 
-(defun notmuch-search-archive-thread ()
-  "Archive the currently selected thread (remove its \"inbox\" tag).
+(defun notmuch-search-archive-thread (&optional unarchive)
+  "Archive the currently selected thread.
+
+Archive each message in the currently selected thread by applying
+the tag changes in `notmuch-archive-tags' to each (remove the
+\"inbox\" tag by default). If a prefix argument is given, the
+messages will be \"unarchived\" (i.e. the tag changes in
+`notmuch-archive-tags' will be reversed).
 
 This function advances the next thread when finished."
-  (interactive)
-  (notmuch-search-tag '("-inbox"))
-  (notmuch-search-tag '("-unseen"))
+  (interactive "P")
+  (when notmuch-archive-tags
+    (notmuch-search-tag
+     (notmuch-tag-change-list notmuch-archive-tags unarchive)))
   (notmuch-search-next-thread))
 
 (defun notmuch-search-update-result (result &optional pos)
@@ -810,12 +820,6 @@ non-authors is found, assume that all of the authors match."
     (insert (apply #'format string objects))
     (insert "\n")))
 
-(defvar notmuch-search-process-state nil
-  "Parsing state of the search process filter.")
-
-(defvar notmuch-search-json-parser nil
-  "Incremental JSON parser for the search process filter.")
-
 (defun notmuch-search-process-filter (proc string)
   "Process and filter the output of \"notmuch search\""
   (let ((results-buf (process-buffer proc))
@@ -828,41 +832,10 @@ non-authors is found, assume that all of the authors match."
 	;; Insert new data
 	(save-excursion
 	  (goto-char (point-max))
-	  (insert string)))
-      (with-current-buffer results-buf
-	(while (not done)
-	  (condition-case nil
-	      (case notmuch-search-process-state
-		((begin)
-		 ;; Enter the results list
-		 (if (eq (notmuch-json-begin-compound
-			  notmuch-search-json-parser) 'retry)
-		     (setq done t)
-		   (setq notmuch-search-process-state 'result)))
-		((result)
-		 ;; Parse a result
-		 (let ((result (notmuch-json-read notmuch-search-json-parser)))
-		   (case result
-		     ((retry) (setq done t))
-		     ((end) (setq notmuch-search-process-state 'end))
-		     (otherwise (notmuch-search-show-result result)))))
-		((end)
-		 ;; Any trailing data is unexpected
-		 (notmuch-json-eof notmuch-search-json-parser)
-		 (setq done t)))
-	    (json-error
-	     ;; Do our best to resynchronize and ensure forward
-	     ;; progress
-	     (notmuch-search-show-error
-	      "%s"
-	      (with-current-buffer parse-buf
-		(let ((bad (buffer-substring (line-beginning-position)
-					     (line-end-position))))
-		  (forward-line)
-		  bad))))))
-	;; Clear out what we've parsed
-	(with-current-buffer parse-buf
-	  (delete-region (point-min) (point)))))))
+	  (insert string))
+	(notmuch-json-parse-partial-list 'notmuch-search-show-result
+					 'notmuch-search-show-error
+					 results-buf)))))
 
 (defun notmuch-search-tag-all (&optional tag-changes)
   "Add/remove tags from all messages in current search buffer.
@@ -907,7 +880,7 @@ PROMPT is the string to prompt with."
 	(append (list "folder:" "thread:" "id:" "date:" "from:" "to:"
 		      "subject:" "attachment:")
 		(mapcar (lambda (tag)
-			  (concat "tag:" tag))
+			  (concat "tag:" (notmuch-escape-boolean-term tag)))
 			(process-lines notmuch-command "search" "--output=tags" "*")))))
     (let ((keymap (copy-keymap minibuffer-local-map))
 	  (minibuffer-completion-table
@@ -937,7 +910,7 @@ If `query' is nil, it is read interactively from the minibuffer.
 Other optional parameters are used as follows:
 
   oldest-first: A Boolean controlling the sort order of returned threads
-  target-thread: A thread ID (with the thread: prefix) that will be made
+  target-thread: A thread ID (without the thread: prefix) that will be made
                  current if it appears in the search results.
   target-line: The line number to move to if the target thread does not
                appear in the search results."
@@ -974,9 +947,6 @@ Other optional parameters are used as follows:
 	      ;; This buffer will be killed by the sentinel, which
 	      ;; should be called no matter how the process dies.
 	      (parse-buf (generate-new-buffer " *notmuch search parse*")))
-	  (set (make-local-variable 'notmuch-search-process-state) 'begin)
-	  (set (make-local-variable 'notmuch-search-json-parser)
-	       (notmuch-json-create-parser parse-buf))
 	  (process-put proc 'parse-buf parse-buf)
 	  (set-process-sentinel proc 'notmuch-search-process-sentinel)
 	  (set-process-filter proc 'notmuch-search-process-filter)
@@ -994,7 +964,7 @@ same relative position within the new buffer."
   (interactive)
   (let ((target-line (line-number-at-pos))
 	(oldest-first notmuch-search-oldest-first)
-	(target-thread (notmuch-search-find-thread-id))
+	(target-thread (notmuch-search-find-thread-id 'bare))
 	(query notmuch-search-query-string)
 	(continuation notmuch-search-continuation))
     (notmuch-kill-this-buffer)

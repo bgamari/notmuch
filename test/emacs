@@ -169,7 +169,8 @@ emacs_deliver_message \
      (insert "To: user@example.com\n")'
 sed \
     -e s',^User-Agent: Notmuch/.* Emacs/.*,User-Agent: Notmuch/XXX Emacs/XXX,' \
-    -e s',^Message-ID: <.*>$,Message-ID: <XXX>,' < sent_message >OUTPUT
+    -e s',^Message-ID: <.*>$,Message-ID: <XXX>,' \
+    -e s',^\(Content-Type: text/plain\); charset=us-ascii$,\1,' < sent_message >OUTPUT
 cat <<EOF >EXPECTED
 From: Notmuch Test Suite <test_suite@notmuchmail.org>
 To: user@example.com
@@ -178,7 +179,7 @@ Date: 01 Jan 2000 12:00:00 -0000
 User-Agent: Notmuch/XXX Emacs/XXX
 Message-ID: <XXX>
 MIME-Version: 1.0
-Content-Type: text/plain; charset=us-ascii
+Content-Type: text/plain
 
 This is a test that messages are sent via SMTP
 EOF
@@ -592,6 +593,44 @@ test_emacs '(notmuch-show "id:f35dbb950911171438k5df6eb56k77b6c0944e2e79ae@mail.
 	    (test-visible-output)'
 test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-thread-with-hidden-messages
 
+test_begin_subtest "notmuch-show: show message headers"
+test_emacs \
+	'(let ((notmuch-message-headers '\''("Subject" "To" "Cc" "Date"))
+	       (notmuch-message-headers-visible t))
+	   (notmuch-show "id:f35dbb950911171438k5df6eb56k77b6c0944e2e79ae@mail.gmail.com")
+	   (test-visible-output))'
+test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-message-with-headers-visible
+
+test_begin_subtest "notmuch-show: hide message headers"
+test_emacs \
+	'(let ((notmuch-message-headers '\''("Subject" "To" "Cc" "Date"))
+	       (notmuch-message-headers-visible nil))
+	   (notmuch-show "id:f35dbb950911171438k5df6eb56k77b6c0944e2e79ae@mail.gmail.com")
+	   (test-visible-output))'
+test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-message-with-headers-hidden
+
+test_begin_subtest "notmuch-show: hide message headers (w/ notmuch-show-toggle-visibility-headers)"
+test_emacs \
+	'(let ((notmuch-message-headers '\''("Subject" "To" "Cc" "Date"))
+	       (notmuch-message-headers-visible t))
+	   (notmuch-show "id:f35dbb950911171438k5df6eb56k77b6c0944e2e79ae@mail.gmail.com")
+	   (notmuch-show-toggle-visibility-headers)
+	   (test-visible-output))'
+test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-message-with-headers-hidden
+
+test_begin_subtest "notmuch-show: collapse all messages in thread"
+test_emacs '(notmuch-show "id:f35dbb950911171435ieecd458o853c873e35f4be95@mail.gmail.com")
+	(let ((current-prefix-arg t))
+	  (notmuch-show-open-or-close-all)
+	  (test-visible-output))'
+test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-thread-with-all-messages-collapsed
+
+test_begin_subtest "notmuch-show: uncollapse all messages in thread"
+test_emacs '(notmuch-show "id:f35dbb950911171435ieecd458o853c873e35f4be95@mail.gmail.com")
+	(notmuch-show-open-or-close-all)
+	(test-visible-output)'
+test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-thread-with-all-messages-uncollapsed
+
 test_begin_subtest "Stashing in notmuch-show"
 add_message '[date]="Sat, 01 Jan 2000 12:00:00 -0000"' \
     '[from]="Some One <someone@somewhere.org>"' \
@@ -628,7 +667,7 @@ Some One <someone@somewhere.org>
 Some One Else <notsomeone@somewhere.org>
 Notmuch <notmuch@notmuchmail.org>
 Stash my stashables
-id:"bought"
+id:bought
 bought
 inbox,stashtest
 ${gen_msg_filename}
@@ -652,6 +691,8 @@ test_expect_equal "$(cat OUTPUT)" "thread:XXX"
 test_begin_subtest 'notmuch-show-advance-and-archive with invisible signature'
 message1='id:20091118010116.GC25380@dottiness.seas.harvard.edu'
 message2='id:1258491078-29658-1-git-send-email-dottedmag@dottedmag.net'
+test_emacs "(notmuch-show \"$message2\")
+	    (test-output \"EXPECTED\")"
 test_emacs "(notmuch-search \"$message1 or $message2\")
 	    (notmuch-test-wait)
 	    (notmuch-search-show-thread)
@@ -659,8 +700,6 @@ test_emacs "(notmuch-search \"$message1 or $message2\")
 	    (redisplay)
 	    (notmuch-show-advance-and-archive)
 	    (test-output)"
-test_emacs "(notmuch-show \"$message2\")
-	    (test-output \"EXPECTED\")"
 test_expect_equal_file OUTPUT EXPECTED
 
 test_begin_subtest "Refresh show buffer"
@@ -747,5 +786,39 @@ counter=$(test_emacs \
        notmuch-hello-refresh-hook-counter)'
 )
 test_expect_equal "$counter" 2
+
+
+test_begin_subtest "Rendering HTML mail with images"
+add_message '[subject]="HTML mail with images"' \
+    '[content-type]="multipart/related; boundary=abcd"' \
+    '[body]="--abcd
+Content-Type: text/html
+
+<img src="cid:330@goomoji.gmail">
+
+--abcd
+Content-Type: image/gif
+Content-Transfer-Encoding: base64
+Content-ID: <330@goomoji.gmail>
+
+R0lGODlhDAAMAKIFAF5LAP/zxAAAANyuAP/gaP///wAAAAAAACH5BAEAAAUALAAAAAAMAAwAAAMl
+WLPcGjDKFYi9lxKBOaGcF35DhWHamZUW0K4mAbiwWtuf0uxFAgA7
+--abcd--"'
+test_emacs "(notmuch-show \"id:${gen_msg_id}\")
+	    (test-output)"
+# Normalize output for Emacs 23 and Emacs 24
+sed -i 's/\[cid\]/*/' OUTPUT
+cat <<EOF >EXPECTED
+Notmuch Test Suite <test_suite@notmuchmail.org> (2001-01-05) (inbox)
+Subject: HTML mail with images
+To: Notmuch Test Suite <test_suite@notmuchmail.org>
+Date: Fri, 05 Jan 2001 15:43:57 +0000
+
+[ multipart/related ]
+[ text/html ]
+*
+EOF
+test_expect_equal_file OUTPUT EXPECTED
+
 
 test_done

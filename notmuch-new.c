@@ -37,6 +37,7 @@ typedef struct _filename_list {
 typedef struct {
     int output_is_a_tty;
     int verbose;
+    int debug;
     const char **new_tags;
     size_t new_tags_length;
     const char **new_ignore;
@@ -373,6 +374,10 @@ add_files (notmuch_database_t *notmuch,
 	    strcmp (entry->d_name, ".notmuch") == 0 ||
 	    _entry_in_ignore_list (entry->d_name, state))
 	{
+	    if (_entry_in_ignore_list (entry->d_name, state) && state->debug)
+		printf ("(D) add_files_recursive, pass 1: explicitly ignoring %s/%s\n",
+			path,
+			entry->d_name);
 	    continue;
 	}
 
@@ -414,8 +419,13 @@ add_files (notmuch_database_t *notmuch,
         entry = fs_entries[i];
 
 	/* Ignore files & directories user has configured to be ignored */
-	if (_entry_in_ignore_list (entry->d_name, state))
+	if (_entry_in_ignore_list (entry->d_name, state)) {
+	    if (state->debug)
+		printf ("(D) add_files_recursive, pass 2: explicitly ignoring %s/%s\n",
+			path,
+			entry->d_name);
 	    continue;
+	}
 
 	/* Check if we've walked past any names in db_files or
 	 * db_subdirs. If so, these have been deleted. */
@@ -684,6 +694,10 @@ count_files (const char *path, int *count, add_files_state_t *state)
 	    strcmp (entry->d_name, ".notmuch") == 0 ||
 	    _entry_in_ignore_list (entry->d_name, state))
 	{
+	    if (_entry_in_ignore_list (entry->d_name, state) && state->debug)
+		printf ("(D) count_files: explicitly ignoring %s/%s\n",
+			path,
+			entry->d_name);
 	    continue;
 	}
 
@@ -840,6 +854,7 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
     notmuch_bool_t run_hooks = TRUE;
 
     add_files_state.verbose = 0;
+    add_files_state.debug = 0;
     add_files_state.output_is_a_tty = isatty (fileno (stdout));
 
     argc--; argv++; /* skip subcommand argument */
@@ -847,6 +862,8 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
     for (i = 0; i < argc && argv[i][0] == '-'; i++) {
 	if (STRNCMP_LITERAL (argv[i], "--verbose") == 0) {
 	    add_files_state.verbose = 1;
+	} else if (strcmp (argv[i], "--debug") == 0) {
+	    add_files_state.debug = 1;
 	} else if (strcmp (argv[i], "--no-hooks") == 0) {
 	    run_hooks = FALSE;
 	} else {

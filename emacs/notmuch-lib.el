@@ -24,7 +24,7 @@
 (require 'mm-view)
 (require 'mm-decode)
 (require 'json)
-(eval-when-compile (require 'cl))
+(require 'cl)
 
 (defvar notmuch-command "notmuch"
   "Command to run the notmuch binary.")
@@ -81,6 +81,20 @@
   "A list of saved searches to display."
   :type '(alist :key-type string :value-type string)
   :group 'notmuch-hello)
+
+(defcustom notmuch-archive-tags '("-inbox")
+  "List of tag changes to apply to a message or a thread when it is archived.
+
+Tags starting with \"+\" (or not starting with either \"+\" or
+\"-\") in the list will be added, and tags starting with \"-\"
+will be removed from the message or thread being archived.
+
+For example, if you wanted to remove an \"inbox\" tag and add an
+\"archived\" tag, you would set:
+    (\"-inbox\" \"+archived\")"
+  :type '(repeat string)
+  :group 'notmuch-search
+  :group 'notmuch-show)
 
 (defvar notmuch-folders nil
   "Deprecated name for what is now known as `notmuch-saved-searches'.")
@@ -147,9 +161,23 @@ the user hasn't set this variable with the old or new value."
 	"[No Subject]"
       subject)))
 
+(defun notmuch-escape-boolean-term (term)
+  "Escape a boolean term for use in a query.
+
+The caller is responsible for prepending the term prefix and a
+colon.  This performs minimal escaping in order to produce
+user-friendly queries."
+
+  (save-match-data
+    (if (or (equal term "")
+	    (string-match "[ ()]\\|^\"" term))
+	;; Requires escaping
+	(concat "\"" (replace-regexp-in-string "\"" "\"\"" term t t) "\"")
+      term)))
+
 (defun notmuch-id-to-query (id)
   "Return a query that matches the message with id ID."
-  (concat "id:\"" (replace-regexp-in-string "\"" "\"\"" id t t) "\""))
+  (concat "id:" (notmuch-escape-boolean-term id)))
 
 ;;
 
@@ -240,6 +268,19 @@ the given type."
   (or (plist-get part :content)
       (notmuch-get-bodypart-internal (notmuch-id-to-query (plist-get msg :id)) nth process-crypto)))
 
+;; Workaround: The call to `mm-display-part' below triggers a bug in
+;; Emacs 24 if it attempts to use the shr renderer to display an HTML
+;; part with images in it (demonstrated in 24.1 and 24.2 on Debian and
+;; Fedora 17, though unreproducable in other configurations).
+;; `mm-shr' references the variable `gnus-inhibit-images' without
+;; first loading gnus-art, which defines it, resulting in a
+;; void-variable error.  Hence, we advise `mm-shr' to ensure gnus-art
+;; is loaded.
+(if (>= emacs-major-version 24)
+    (defadvice mm-shr (before load-gnus-arts activate)
+      (require 'gnus-art nil t)
+      (ad-disable-advice 'mm-shr 'before 'load-gnus-arts)))
+
 (defun notmuch-mm-display-part-inline (msg part nth content-type process-crypto)
   "Use the mm-decode/mm-view functions to display a part in the
 current buffer, if possible."
@@ -313,6 +354,16 @@ was called."
 (make-variable-buffer-local 'notmuch-show-process-crypto)
 
 ;; Incremental JSON parsing
+
+;; These two variables are internal variables to the parsing
+;; routines. They are always used buffer local but need to be declared
+;; globally to avoid compiler warnings.
+
+(defvar notmuch-json-parser nil
+  "Internal incremental JSON parser object: local to the buffer being parsed.")
+
+(defvar notmuch-json-state nil
+  "State of the internal JSON parser: local to the buffer being parsed.")
 
 (defun notmuch-json-create-parser (buffer)
   "Return a streaming JSON parser that consumes input from BUFFER.
@@ -507,6 +558,62 @@ of the buffer if there is only trailing whitespace."
     (skip-chars-forward " \t\r\n")
     (unless (eobp)
       (signal 'json-error (list "Trailing garbage following JSON data")))))
+
+(defun notmuch-json-parse-partial-list (result-function error-function results-buf)
+  "Parse a partial JSON list from current buffer.
+
+This function consumes a JSON list from the current buffer,
+applying RESULT-FUNCTION in buffer RESULT-BUFFER to each complete
+value in the list.  It operates incrementally and should be
+called whenever the buffer has been extended with additional
+data.
+
+If there is a syntax error, this will attempt to resynchronize
+with the input and will apply ERROR-FUNCTION in buffer
+RESULT-BUFFER to any input that was skipped.
+
+It sets up all the needed internal variables: the caller just
+needs to call it with point in the same place that the parser
+left it."
+  (let (done)
+    (unless (local-variable-p 'notmuch-json-parser)
+      (set (make-local-variable 'notmuch-json-parser)
+	   (notmuch-json-create-parser (current-buffer)))
+      (set (make-local-variable 'notmuch-json-state) 'begin))
+    (while (not done)
+      (condition-case nil
+	  (case notmuch-json-state
+		((begin)
+		 ;; Enter the results list
+		 (if (eq (notmuch-json-begin-compound
+			  notmuch-json-parser) 'retry)
+		     (setq done t)
+		   (setq notmuch-json-state 'result)))
+		((result)
+		 ;; Parse a result
+		 (let ((result (notmuch-json-read notmuch-json-parser)))
+		   (case result
+			 ((retry) (setq done t))
+			 ((end) (setq notmuch-json-state 'end))
+			 (otherwise (with-current-buffer results-buf
+				      (funcall result-function result))))))
+		((end)
+		 ;; Any trailing data is unexpected
+		 (notmuch-json-eof notmuch-json-parser)
+		 (setq done t)))
+	(json-error
+	 ;; Do our best to resynchronize and ensure forward
+	 ;; progress
+	 (let ((bad (buffer-substring (line-beginning-position)
+				      (line-end-position))))
+	   (forward-line)
+	   (with-current-buffer results-buf
+	     (funcall error-function "%s" bad))))))
+    ;; Clear out what we've parsed
+    (delete-region (point-min) (point))))
+
+
+
 
 (provide 'notmuch-lib)
 
