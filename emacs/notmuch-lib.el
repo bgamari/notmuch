@@ -77,7 +77,8 @@
 (defvar notmuch-search-history nil
   "Variable to store notmuch searches history.")
 
-(defcustom notmuch-saved-searches nil
+(defcustom notmuch-saved-searches '(("inbox" . "tag:inbox")
+				    ("unread" . "tag:unread"))
   "A list of saved searches to display."
   :type '(alist :key-type string :value-type string)
   :group 'notmuch-hello)
@@ -95,22 +96,6 @@ For example, if you wanted to remove an \"inbox\" tag and add an
   :type '(repeat string)
   :group 'notmuch-search
   :group 'notmuch-show)
-
-(defvar notmuch-folders nil
-  "Deprecated name for what is now known as `notmuch-saved-searches'.")
-
-(defun notmuch-saved-searches ()
-  "Common function for querying the notmuch-saved-searches variable.
-
-We do this as a function to support the old name of the
-variable (`notmuch-folders') as well as for the default value if
-the user hasn't set this variable with the old or new value."
-  (if notmuch-saved-searches
-      notmuch-saved-searches
-    (if notmuch-folders
-	notmuch-folders
-      '(("inbox" . "tag:inbox")
-	("unread" . "tag:unread")))))
 
 (defun notmuch-version ()
   "Return a string with the notmuch version number."
@@ -183,8 +168,14 @@ user-friendly queries."
 
 (defun notmuch-common-do-stash (text)
   "Common function to stash text in kill ring, and display in minibuffer."
-  (kill-new text)
-  (message "Stashed: %s" text))
+  (if text
+      (progn
+	(kill-new text)
+	(message "Stashed: %s" text))
+    ;; There is nothing to stash so stash an empty string so the user
+    ;; doesn't accidentally paste something else somewhere.
+    (kill-new "")
+    (message "Nothing to stash!")))
 
 ;;
 
@@ -324,6 +315,105 @@ string), a property list of face attributes, or a list of these."
 	    (next (next-single-property-change pos 'face nil end)))
 	(put-text-property pos next 'face (cons face cur))
 	(setq pos next)))))
+
+(defun notmuch-pop-up-error (msg)
+  "Pop up an error buffer displaying MSG.
+
+This will accumulate error messages in the errors buffer until
+the user dismisses it."
+
+  (let ((buf (get-buffer-create "*Notmuch errors*")))
+    (with-current-buffer buf
+      (view-mode-enter nil #'kill-buffer)
+      (let ((inhibit-read-only t))
+	(goto-char (point-max))
+	(unless (bobp)
+	  (insert "\n"))
+	(insert msg)
+	(unless (bolp)
+	  (insert "\n"))))
+    (pop-to-buffer buf)))
+
+(defun notmuch-check-async-exit-status (proc msg)
+  "If PROC exited abnormally, pop up an error buffer and signal an error.
+
+This is a wrapper around `notmuch-check-exit-status' for
+asynchronous process sentinels.  PROC and MSG must be the
+arguments passed to the sentinel."
+  (let ((exit-status
+	 (case (process-status proc)
+	   ((exit) (process-exit-status proc))
+	   ((signal) msg))))
+    (when exit-status
+      (notmuch-check-exit-status exit-status (process-command proc)))))
+
+(defun notmuch-check-exit-status (exit-status command &optional output err-file)
+  "If EXIT-STATUS is non-zero, pop up an error buffer and signal an error.
+
+If EXIT-STATUS is non-zero, pop up a notmuch error buffer
+describing the error and signal an Elisp error.  EXIT-STATUS must
+be a number indicating the exit status code of a process or a
+string describing the signal that terminated the process (such as
+returned by `call-process').  COMMAND must be a list giving the
+command and its arguments.  OUTPUT, if provided, is a string
+giving the output of command.  ERR-FILE, if provided, is the name
+of a file containing the error output of command.  OUTPUT and the
+contents of ERR-FILE will be included in the error message."
+
+  (cond
+   ((eq exit-status 0) t)
+   ((eq exit-status 20)
+    (notmuch-pop-up-error "Error: Version mismatch.
+Emacs requested an older output format than supported by the notmuch CLI.
+You may need to restart Emacs or upgrade your notmuch Emacs package.")
+    (error "notmuch CLI version mismatch"))
+   ((eq exit-status 21)
+    (notmuch-pop-up-error "Error: Version mismatch.
+Emacs requested a newer output format than supported by the notmuch CLI.
+You may need to restart Emacs or upgrade your notmuch package.")
+    (error "notmuch CLI version mismatch"))
+   (t
+    (notmuch-pop-up-error
+     (concat
+      (format "Error invoking notmuch.  %s exited with %s%s.\n"
+	      (mapconcat #'identity command " ")
+	      ;; Signal strings look like "Terminated", hence the
+	      ;; colon.
+	      (if (integerp exit-status) "status " "signal: ")
+	      exit-status)
+      (when err-file
+	(concat "Error:\n"
+		(with-temp-buffer
+		  (insert-file-contents err-file)
+		  (if (eobp)
+		      "(no error output)\n"
+		    (buffer-string)))))
+      (when (and output (not (equal output "")))
+	(format "Output:\n%s" output))))
+    ;; Mimic `process-lines'
+    (error "%s exited with status %s" (car command) exit-status))))
+
+(defun notmuch-call-notmuch-json (&rest args)
+  "Invoke `notmuch-command' with `args' and return the parsed JSON output.
+
+The returned output will represent objects using property lists
+and arrays as lists.  If notmuch exits with a non-zero status,
+this will pop up a buffer containing notmuch's output and signal
+an error."
+
+  (with-temp-buffer
+    (let ((err-file (make-temp-file "nmerr")))
+      (unwind-protect
+	  (let ((status (apply #'call-process
+			       notmuch-command nil (list t err-file) nil args)))
+	    (notmuch-check-exit-status status (cons notmuch-command args)
+				       (buffer-string) err-file)
+	    (goto-char (point-min))
+	    (let ((json-object-type 'plist)
+		  (json-array-type 'list)
+		  (json-false 'nil))
+	      (json-read)))
+	(delete-file err-file)))))
 
 ;; Compatibility functions for versions of emacs before emacs 23.
 ;;
@@ -474,15 +564,19 @@ Entering JSON objects is currently unimplemented."
   (with-current-buffer (notmuch-json-buffer jp)
     ;; Disallow terminators
     (setf (notmuch-json-allow-term jp) nil)
-    (or (notmuch-json-scan-to-value jp)
-	(if (/= (char-after) ?\[)
-	    (signal 'json-readtable-error (list "expected '['"))
-	  (forward-char)
-	  (push ?\] (notmuch-json-term-stack jp))
-	  ;; Expect a value or terminator next
-	  (setf (notmuch-json-next jp) 'expect-value
-		(notmuch-json-allow-term jp) t)
-	  t))))
+    ;; Save "next" so we can restore it if there's a syntax error
+    (let ((saved-next (notmuch-json-next jp)))
+      (or (notmuch-json-scan-to-value jp)
+	  (if (/= (char-after) ?\[)
+	      (progn
+		(setf (notmuch-json-next jp) saved-next)
+		(signal 'json-readtable-error (list "expected '['")))
+	    (forward-char)
+	    (push ?\] (notmuch-json-term-stack jp))
+	    ;; Expect a value or terminator next
+	    (setf (notmuch-json-next jp) 'expect-value
+		  (notmuch-json-allow-term jp) t)
+	    t)))))
 
 (defun notmuch-json-read (jp)
   "Parse the value at point in JP's buffer.

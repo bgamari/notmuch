@@ -36,8 +36,8 @@ typedef struct _filename_list {
 
 typedef struct {
     int output_is_a_tty;
-    int verbose;
-    int debug;
+    notmuch_bool_t verbose;
+    notmuch_bool_t debug;
     const char **new_tags;
     size_t new_tags_length;
     const char **new_ignore;
@@ -350,6 +350,18 @@ add_files (notmuch_database_t *notmuch,
 
 	entry = fs_entries[i];
 
+	/* Ignore any files/directories the user has configured to
+	 * ignore.  We do this before dirent_type both for performance
+	 * and because we don't care if dirent_type fails on entries
+	 * that are explicitly ignored.
+	 */
+	if (_entry_in_ignore_list (entry->d_name, state)) {
+	    if (state->debug)
+		printf ("(D) add_files_recursive, pass 1: explicitly ignoring %s/%s\n",
+			path, entry->d_name);
+	    continue;
+	}
+
 	/* We only want to descend into directories (and symlinks to
 	 * directories). */
 	entry_type = dirent_type (path, entry);
@@ -364,22 +376,14 @@ add_files (notmuch_database_t *notmuch,
 	}
 
 	/* Ignore special directories to avoid infinite recursion.
-	 * Also ignore the .notmuch directory, any "tmp" directory
-	 * that appears within a maildir and files/directories
-	 * the user has configured to be ignored.
+	 * Also ignore the .notmuch directory and any "tmp" directory
+	 * that appears within a maildir.
 	 */
 	if (strcmp (entry->d_name, ".") == 0 ||
 	    strcmp (entry->d_name, "..") == 0 ||
 	    (is_maildir && strcmp (entry->d_name, "tmp") == 0) ||
-	    strcmp (entry->d_name, ".notmuch") == 0 ||
-	    _entry_in_ignore_list (entry->d_name, state))
-	{
-	    if (_entry_in_ignore_list (entry->d_name, state) && state->debug)
-		printf ("(D) add_files_recursive, pass 1: explicitly ignoring %s/%s\n",
-			path,
-			entry->d_name);
+	    strcmp (entry->d_name, ".notmuch") == 0)
 	    continue;
-	}
 
 	next = talloc_asprintf (notmuch, "%s/%s", path, entry->d_name);
 	status = add_files (notmuch, next, state);
@@ -849,28 +853,28 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
     char *dot_notmuch_path;
     struct sigaction action;
     _filename_node_t *f;
+    int opt_index;
     int i;
     notmuch_bool_t timer_is_active = FALSE;
-    notmuch_bool_t run_hooks = TRUE;
+    notmuch_bool_t no_hooks = FALSE;
 
-    add_files_state.verbose = 0;
-    add_files_state.debug = 0;
+    add_files_state.verbose = FALSE;
+    add_files_state.debug = FALSE;
     add_files_state.output_is_a_tty = isatty (fileno (stdout));
 
-    argc--; argv++; /* skip subcommand argument */
+    notmuch_opt_desc_t options[] = {
+	{ NOTMUCH_OPT_BOOLEAN,  &add_files_state.verbose, "verbose", 'v', 0 },
+	{ NOTMUCH_OPT_BOOLEAN,  &add_files_state.debug, "debug", 'd', 0 },
+	{ NOTMUCH_OPT_BOOLEAN,  &no_hooks, "no-hooks", 'n', 0 },
+	{ 0, 0, 0, 0, 0 }
+    };
 
-    for (i = 0; i < argc && argv[i][0] == '-'; i++) {
-	if (STRNCMP_LITERAL (argv[i], "--verbose") == 0) {
-	    add_files_state.verbose = 1;
-	} else if (strcmp (argv[i], "--debug") == 0) {
-	    add_files_state.debug = 1;
-	} else if (strcmp (argv[i], "--no-hooks") == 0) {
-	    run_hooks = FALSE;
-	} else {
-	    fprintf (stderr, "Unrecognized option: %s\n", argv[i]);
-	    return 1;
-	}
+    opt_index = parse_arguments (argc, argv, options, 1);
+    if (opt_index < 0) {
+	/* diagnostics already printed */
+	return 1;
     }
+
     config = notmuch_config_open (ctx, NULL, NULL);
     if (config == NULL)
 	return 1;
@@ -880,7 +884,7 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
     add_files_state.synchronize_flags = notmuch_config_get_maildir_synchronize_flags (config);
     db_path = notmuch_config_get_database_path (config);
 
-    if (run_hooks) {
+    if (!no_hooks) {
 	ret = notmuch_run_hook (db_path, "pre-new");
 	if (ret)
 	    return ret;
@@ -1041,7 +1045,7 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
 
     notmuch_database_destroy (notmuch);
 
-    if (run_hooks && !ret && !interrupted)
+    if (!no_hooks && !ret && !interrupted)
 	ret = notmuch_run_hook (db_path, "post-new");
 
     return ret || interrupted;

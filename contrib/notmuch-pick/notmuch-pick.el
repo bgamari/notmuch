@@ -35,7 +35,6 @@
 (declare-function notmuch-show "notmuch-show" (&rest args))
 (declare-function notmuch-tag "notmuch" (query &rest tags))
 (declare-function notmuch-show-strip-re "notmuch-show" (subject))
-(declare-function notmuch-show-clean-address "notmuch-show" (parsed-address))
 (declare-function notmuch-show-spaces-n "notmuch-show" (n))
 (declare-function notmuch-read-query "notmuch" (prompt))
 (declare-function notmuch-read-tag-changes "notmuch" (&optional initial-input &rest search-terms))
@@ -158,6 +157,10 @@
 (make-variable-buffer-local 'notmuch-pick-query-context)
 (defvar notmuch-pick-buffer-name nil)
 (make-variable-buffer-local 'notmuch-pick-buffer-name)
+;; This variable is the window used for the message pane. It is set
+;; in both the parent pick buffer and the child show buffer. It is
+;; used to try and close the message pane when quitting pick or the
+;; child show buffer.
 (defvar notmuch-pick-message-window nil)
 (make-variable-buffer-local 'notmuch-pick-message-window)
 (put 'notmuch-pick-message-window 'permanent-local t)
@@ -174,10 +177,10 @@
     (define-key map "q" 'notmuch-pick-quit)
     (define-key map "x" 'notmuch-pick-quit)
     (define-key map "?" 'notmuch-help)
-    (define-key map "a" 'notmuch-pick-archive-message)
+    (define-key map "a" 'notmuch-pick-archive-message-then-next)
     (define-key map "=" 'notmuch-pick-refresh-view)
-    (define-key map "s" 'notmuch-search)
-    (define-key map "z" 'notmuch-pick)
+    (define-key map "s" 'notmuch-pick-to-search)
+    (define-key map "z" 'notmuch-pick-to-pick)
     (define-key map "m" 'notmuch-pick-new-mail)
     (define-key map "f" 'notmuch-pick-forward-message)
     (define-key map "r" 'notmuch-pick-reply-sender)
@@ -241,7 +244,10 @@ Some useful entries are:
 
 (defun notmuch-pick-get-message-id ()
   "Return the message id of the current message."
-  (concat "id:\"" (notmuch-pick-get-prop :id) "\""))
+  (let ((id (notmuch-pick-get-prop :id)))
+    (if id
+	(notmuch-id-to-query id)
+      nil)))
 
 (defun notmuch-pick-get-match ()
   "Return whether the current message is a match."
@@ -287,6 +293,25 @@ Does NOT change the database."
   (interactive)
   (notmuch-pick-tag "-"))
 
+;; The next two functions close the message window before searching or
+;; picking but they do so after the user has entered the query (in
+;; case the user was basing the query on something in the message
+;; window).
+
+(defun notmuch-pick-to-search ()
+  "Run \"notmuch search\" with the given `query' and display results."
+  (interactive)
+  (let ((query (notmuch-read-query "Notmuch search: ")))
+    (notmuch-pick-close-message-window)
+    (notmuch-search query)))
+
+(defun notmuch-pick-to-pick ()
+  "Run a query and display results in experimental notmuch-pick mode"
+  (interactive)
+  (let ((query (notmuch-read-query "Notmuch pick: ")))
+    (notmuch-pick-close-message-window)
+    (notmuch-pick query)))
+
 ;; This function should be in notmuch-hello.el but we are trying to
 ;; minimise impact on the rest of the codebase.
 (defun notmuch-pick-from-hello (&optional search)
@@ -322,6 +347,16 @@ Does NOT change the database."
                 (notmuch-prettify-subject (notmuch-search-find-subject)))
   (notmuch-pick-show-match-message-with-wait))
 
+(defun notmuch-pick-message-window-kill-hook ()
+  (let ((buffer (current-buffer)))
+    (when (and (window-live-p notmuch-pick-message-window)
+	       (eq (window-buffer notmuch-pick-message-window) buffer))
+      ;; We do not want an error if this is the sole window in the
+      ;; frame and I do not know how to test for that in emacs pre
+      ;; 24. Hence we just ignore-errors.
+      (ignore-errors
+	(delete-window notmuch-pick-message-window)))))
+
 (defun notmuch-pick-show-message ()
   "Show the current message (in split-pane)."
   (interactive)
@@ -335,10 +370,17 @@ Does NOT change the database."
       (setq notmuch-pick-message-window
 	    (split-window-vertically (/ (window-height) 4)))
       (with-selected-window notmuch-pick-message-window
-	(setq current-prefix-arg '(4))
-	(setq buffer (notmuch-show id nil nil nil)))
-      (notmuch-pick-tag-update-display (list "-unread")))
-    (setq notmuch-pick-message-buffer buffer)))
+	;; Since we are only displaying one message do not indent.
+	(let ((notmuch-show-indent-messages-width 0))
+	  (setq current-prefix-arg '(4))
+	  (setq buffer (notmuch-show id nil nil nil))))
+      ;; We need the `let' as notmuch-pick-message-window is buffer local.
+      (let ((window notmuch-pick-message-window))
+	(with-current-buffer buffer
+	  (setq notmuch-pick-message-window window)
+	  (add-hook 'kill-buffer-hook 'notmuch-pick-message-window-kill-hook)))
+      (notmuch-pick-tag-update-display (list "-unread"))
+      (setq notmuch-pick-message-buffer buffer))))
 
 (defun notmuch-pick-show-message-out ()
   "Show the current message (in whole window)."
@@ -391,10 +433,23 @@ Does NOT change the database."
       (kill-buffer notmuch-pick-message-buffer))
     t))
 
-(defun notmuch-pick-archive-message ()
+(defun notmuch-pick-archive-message (&optional unarchive)
+  "Archive the current message.
+
+Archive the current message by applying the tag changes in
+`notmuch-archive-tags' to it (remove the \"inbox\" tag by
+default). If a prefix argument is given, the message will be
+\"unarchived\", i.e. the tag changes in `notmuch-archive-tags'
+will be reversed."
+  (interactive "P")
+  (when notmuch-archive-tags
+    (apply 'notmuch-pick-tag
+	   (notmuch-tag-change-list notmuch-archive-tags unarchive))))
+
+(defun notmuch-pick-archive-message-then-next (&optional unarchive)
   "Archive the current message and move to next matching message."
-  (interactive)
-  (notmuch-pick-tag "-inbox")
+  (interactive "P")
+  (notmuch-pick-archive-message unarchive)
   (notmuch-pick-next-matching-message))
 
 (defun notmuch-pick-next-message ()
@@ -435,7 +490,7 @@ Does NOT change the database."
   (unless (notmuch-pick-get-match)
     (notmuch-pick-next-matching-message))
   (while (and (not (notmuch-pick-get-match))
-	      (not (eq notmuch-pick-process-state 'end)))
+	      (get-buffer-process (current-buffer)))
     (message "waiting for message")
     (sit-for 0.1)
     (goto-char (point-min))
@@ -518,62 +573,16 @@ than only the current message."
 	  (message (format "Command '%s' exited abnormally with code %d"
 			   shell-command exit-code)))))))
 
-;; Shamelessly stolen from notmuch-show.el: should be unified.
 (defun notmuch-pick-clean-address (address)
-  "Try to clean a single email ADDRESS for display.  Return
+  "Try to clean a single email ADDRESS for display. Return
+AUTHOR_NAME if present, otherwise return AUTHOR_EMAIL. Return
 unchanged ADDRESS if parsing fails."
-  (condition-case nil
-    (let (p-name p-address)
-      ;; It would be convenient to use `mail-header-parse-address',
-      ;; but that expects un-decoded mailbox parts, whereas our
-      ;; mailbox parts are already decoded (and hence may contain
-      ;; UTF-8). Given that notmuch should handle most of the awkward
-      ;; cases, some simple string deconstruction should be sufficient
-      ;; here.
-      (cond
-       ;; "User <user@dom.ain>" style.
-       ((string-match "\\(.*\\) <\\(.*\\)>" address)
-	(setq p-name (match-string 1 address)
-	      p-address (match-string 2 address)))
+  (let* ((clean-address (notmuch-clean-address address))
+	 (p-address (car clean-address))
+	 (p-name (cdr clean-address)))
 
-       ;; "<user@dom.ain>" style.
-       ((string-match "<\\(.*\\)>" address)
-	(setq p-address (match-string 1 address)))
-
-       ;; Everything else.
-       (t
-	(setq p-address address)))
-
-      (when p-name
-	;; Remove elements of the mailbox part that are not relevant for
-	;; display, even if they are required during transport:
-	;;
-	;; Backslashes.
-	(setq p-name (replace-regexp-in-string "\\\\" "" p-name))
-
-	;; Outer single and double quotes, which might be nested.
-	(loop
-	 with start-of-loop
-	 do (setq start-of-loop p-name)
-
-	 when (string-match "^\"\\(.*\\)\"$" p-name)
-	 do (setq p-name (match-string 1 p-name))
-
-	 when (string-match "^'\\(.*\\)'$" p-name)
-	 do (setq p-name (match-string 1 p-name))
-
-	 until (string= start-of-loop p-name)))
-
-      ;; If the address is 'foo@bar.com <foo@bar.com>' then show just
-      ;; 'foo@bar.com'.
-      (when (string= p-name p-address)
-	(setq p-name nil))
-
-      ;; If we have a name return that otherwise return the address.
-      (if (not p-name)
-	  p-address
-	p-name))
-    (error address)))
+    ;; If we have a name return that otherwise return the address.
+    (or p-name p-address)))
 
 (defun notmuch-pick-insert-field (field format-string msg)
   (let* ((headers (plist-get msg :headers))
@@ -733,9 +742,6 @@ Complete list of currently available key bindings:
     (insert "\n")))
 
 
-(defvar notmuch-pick-json-parser nil
-  "Incremental JSON parser for the search process filter.")
-
 (defun notmuch-pick-process-filter (proc string)
   "Process and filter the output of \"notmuch show\" (for pick)"
   (let ((results-buf (process-buffer proc))
@@ -748,46 +754,10 @@ Complete list of currently available key bindings:
         ;; Insert new data
         (save-excursion
           (goto-char (point-max))
-          (insert string)))
-      (with-current-buffer results-buf
-	(save-excursion
-	  (goto-char (point-max))
-	  (while (not done)
-	    (condition-case nil
-		(case notmuch-pick-process-state
-		      ((begin)
-		       ;; Enter the results list
-		       (if (eq (notmuch-json-begin-compound
-				notmuch-pick-json-parser) 'retry)
-			   (setq done t)
-			 (setq notmuch-pick-process-state 'result)))
-		      ((result)
-		       ;; Parse a result
-		       (let ((result (notmuch-json-read notmuch-pick-json-parser)))
-			 (case result
-			       ((retry) (setq done t))
-			       ((end) (setq notmuch-pick-process-state 'end))
-			       (otherwise (notmuch-pick-insert-forest-thread result)))))
-		      ((end)
-		       ;; Any trailing data is unexpected
-		       (with-current-buffer parse-buf
-			 (skip-chars-forward " \t\r\n")
-			 (if (eobp)
-			     (setq done t)
-			   (signal 'json-error nil)))))
-	      (json-error
-	       ;; Do our best to resynchronize and ensure forward
-	       ;; progress
-	       (notmuch-pick-show-error
-		"%s"
-		(with-current-buffer parse-buf
-		  (let ((bad (buffer-substring (line-beginning-position)
-					       (line-end-position))))
-		    (forward-line)
-		    bad))))))
-	  ;; Clear out what we've parsed
-	  (with-current-buffer parse-buf
-	    (delete-region (point-min) (point))))))))
+          (insert string))
+	(notmuch-json-parse-partial-list 'notmuch-pick-insert-forest-thread
+					 'notmuch-pick-show-error
+					 results-buf)))))
 
 (defun notmuch-pick-worker (basic-query &optional query-context buffer)
   (interactive)
@@ -804,8 +774,6 @@ Complete list of currently available key bindings:
 	 (message-arg "--entire-thread"))
     (if (equal (car (process-lines notmuch-command "count" search-args)) "0")
 	(setq search-args basic-query))
-    (message "starting parser %s"
-	     (format-time-string "%r"))
     (if notmuch-pick-asynchronous-parser
 	(let ((proc (start-process
 		     "notmuch-pick" buffer
@@ -815,9 +783,6 @@ Complete list of currently available key bindings:
               ;; This buffer will be killed by the sentinel, which
               ;; should be called no matter how the process dies.
               (parse-buf (generate-new-buffer " *notmuch pick parse*")))
-          (set (make-local-variable 'notmuch-pick-process-state) 'begin)
-          (set (make-local-variable 'notmuch-pick-json-parser)
-               (notmuch-json-create-parser parse-buf))
           (process-put proc 'parse-buf parse-buf)
 	  (set-process-sentinel proc 'notmuch-pick-process-sentinel)
 	  (set-process-filter proc 'notmuch-pick-process-filter)
@@ -828,9 +793,7 @@ Complete list of currently available key bindings:
 	  (list "--body=false" message-arg search-args)))
 	(save-excursion
 	  (goto-char (point-max))
-	  (insert "End of search results.\n"))
-	(message "sync parser finished %s"
-		 (format-time-string "%r"))))))
+	  (insert "End of search results.\n"))))))
 
 
 (defun notmuch-pick (&optional query query-context buffer-name show-first-match)

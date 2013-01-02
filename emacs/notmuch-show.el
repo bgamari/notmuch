@@ -94,7 +94,7 @@ visible for any given message."
   :group 'notmuch-hooks)
 
 ;; Mostly useful for debugging.
-(defcustom notmuch-show-all-multipart/alternative-parts t
+(defcustom notmuch-show-all-multipart/alternative-parts nil
   "Should all parts of multipart/alternative parts be shown?"
   :type 'boolean
   :group 'notmuch-show)
@@ -203,9 +203,10 @@ For example, if you wanted to remove an \"unread\" tag and add a
      (let ((id (notmuch-show-get-message-id)))
        (let ((buf (generate-new-buffer (concat "*notmuch-msg-" id "*"))))
          (with-current-buffer buf
-	    (call-process notmuch-command nil t nil "show" "--format=raw" id)
-           ,@body)
-	 (kill-buffer buf)))))
+	   (let ((coding-system-for-read 'no-conversion))
+	     (call-process notmuch-command nil t nil "show" "--format=raw" id)
+	     ,@body)
+	   (kill-buffer buf))))))
 
 (defun notmuch-show-turn-on-visual-line-mode ()
   "Enable Visual Line mode."
@@ -365,9 +366,10 @@ operation on the contents of the current buffer."
 					     'face 'notmuch-tag-face)
 				 ")"))))))
 
-(defun notmuch-show-clean-address (address)
-  "Try to clean a single email ADDRESS for display.  Return
-unchanged ADDRESS if parsing fails."
+(defun notmuch-clean-address (address)
+  "Try to clean a single email ADDRESS for display. Return a cons
+cell of (AUTHOR_EMAIL AUTHOR_NAME). Return (ADDRESS nil) if
+parsing fails."
   (condition-case nil
     (let (p-name p-address)
       ;; It would be convenient to use `mail-header-parse-address',
@@ -415,12 +417,20 @@ unchanged ADDRESS if parsing fails."
       (when (string= p-name p-address)
 	(setq p-name nil))
 
-      ;; If no name results, return just the address.
-      (if (not p-name)
-	  p-address
-	;; Otherwise format the name and address together.
-	(concat p-name " <" p-address ">")))
-    (error address)))
+      (cons p-address p-name))
+    (error (cons address nil))))
+
+(defun notmuch-show-clean-address (address)
+  "Try to clean a single email ADDRESS for display.  Return
+unchanged ADDRESS if parsing fails."
+  (let* ((clean-address (notmuch-clean-address address))
+	 (p-address (car clean-address))
+	 (p-name (cdr clean-address)))
+    ;; If no name, return just the address.
+    (if (not p-name)
+	p-address
+      ;; Otherwise format the name and address together.
+      (concat p-name " <" p-address ">"))))
 
 (defun notmuch-show-insert-headerline (headers date tags depth)
   "Insert a notmuch style headerline based on HEADERS for a
@@ -473,17 +483,17 @@ message at DEPTH in the current thread."
 (fset 'notmuch-show-part-button-map notmuch-show-part-button-map)
 
 (defun notmuch-show-insert-part-header (nth content-type declared-type &optional name comment)
-  (let ((button))
+  (let ((button)
+	(base-label (concat (when name (concat name ": "))
+			    declared-type
+			    (unless (string-equal declared-type content-type)
+			      (concat " (as " content-type ")"))
+			    comment)))
+
     (setq button
 	  (insert-button
-	   (concat "[ "
-		   (if name (concat name ": ") "")
-		   declared-type
-		   (if (not (string-equal declared-type content-type))
-		       (concat " (as " content-type ")")
-		     "")
-		   (or comment "")
-		   " ]")
+	   (concat "[ " base-label " ]")
+	   :base-label base-label
 	   :type 'notmuch-show-part-button-type
 	   :notmuch-part nth
 	   :notmuch-filename name
@@ -544,6 +554,25 @@ message at DEPTH in the current thread."
     (let ((handle (mm-make-handle (current-buffer) (list content-type))))
       (mm-pipe-part handle))))
 
+;; This is taken from notmuch-wash: maybe it should be unified?
+(defun notmuch-show-toggle-part-invisibility (&optional button)
+  (interactive)
+  (let* ((button (or button (button-at (point))))
+	 (overlay (button-get button 'overlay)))
+    (when overlay
+      (let* ((show (overlay-get overlay 'invisible))
+	     (new-start (button-start button))
+	     (button-label (button-get button :base-label))
+	     (old-point (point))
+	     (inhibit-read-only t))
+	(overlay-put overlay 'invisible (not show))
+	(goto-char new-start)
+	(insert "[ " button-label (if show " ]" " (hidden) ]"))
+	(let ((old-end (button-end button)))
+	  (move-overlay button new-start (point))
+	  (delete-region (point) old-end))
+	(goto-char (min old-point (1- (button-end button))))))))
+
 (defun notmuch-show-multipart/*-to-list (part)
   (mapcar (lambda (inner-part) (plist-get inner-part :content-type))
 	  (plist-get part :content)))
@@ -557,11 +586,10 @@ message at DEPTH in the current thread."
     ;; but it's not clear that this is the wrong thing to do - which
     ;; should be chosen if there are more than one that match?
     (mapc (lambda (inner-part)
-	    (let ((inner-type (plist-get inner-part :content-type)))
-	      (if (or notmuch-show-all-multipart/alternative-parts
-		      (string= chosen-type inner-type))
-		  (notmuch-show-insert-bodypart msg inner-part depth)
-		(notmuch-show-insert-part-header (plist-get inner-part :id) inner-type inner-type nil " (not shown)"))))
+	    (let* ((inner-type (plist-get inner-part :content-type))
+		  (hide (not (or notmuch-show-all-multipart/alternative-parts
+			   (string= chosen-type inner-type)))))
+	      (notmuch-show-insert-bodypart msg inner-part depth hide)))
 	  inner-parts)
 
     (when notmuch-show-indent-multipart
@@ -747,17 +775,22 @@ message at DEPTH in the current thread."
   (notmuch-show-insert-part-header nth declared-type content-type (plist-get part :filename))
   (insert (with-temp-buffer
 	    (insert (notmuch-get-bodypart-content msg part nth notmuch-show-process-crypto))
+	    ;; notmuch-get-bodypart-content provides "raw", non-converted
+	    ;; data. Replace CRLF with LF before icalendar can use it.
 	    (goto-char (point-min))
+	    (while (re-search-forward "\r\n" nil t)
+	      (replace-match "\n" nil nil))
 	    (let ((file (make-temp-file "notmuch-ical"))
 		  result)
-	      (icalendar--convert-ical-to-diary
-	       (icalendar--read-element nil nil)
-	       file t)
-	      (set-buffer (get-file-buffer file))
-	      (setq result (buffer-substring (point-min) (point-max)))
-	      (set-buffer-modified-p nil)
-	      (kill-buffer (current-buffer))
-	      (delete-file file)
+	      (unwind-protect
+		  (progn
+		    (unless (icalendar-import-buffer file t)
+		      (error "Icalendar import error. See *icalendar-errors* for more information"))
+		    (set-buffer (get-file-buffer file))
+		    (setq result (buffer-substring (point-min) (point-max)))
+		    (set-buffer-modified-p nil)
+		    (kill-buffer (current-buffer)))
+		(delete-file file))
 	      result)))
   t)
 
@@ -815,21 +848,47 @@ message at DEPTH in the current thread."
     ;; Run the content handlers until one of them returns a non-nil
     ;; value.
     (while (and handlers
-		(not (funcall (car handlers) msg part content-type nth depth declared-type)))
+		(not (condition-case err
+			 (funcall (car handlers) msg part content-type nth depth declared-type)
+		       (error (progn
+				(insert "!!! Bodypart insert error: ")
+				(insert (error-message-string err))
+				(insert " !!!\n") nil)))))
       (setq handlers (cdr handlers))))
   t)
 
-(defun notmuch-show-insert-bodypart (msg part depth)
-  "Insert the body part PART at depth DEPTH in the current thread."
+(defun notmuch-show-create-part-overlays (msg beg end hide)
+  "Add an overlay to the part between BEG and END"
+  (let* ((button (button-at beg))
+	 (part-beg (and button (1+ (button-end button)))))
+
+    ;; If the part contains no text we do not make it toggleable. We
+    ;; also need to check that the button is a genuine part button not
+    ;; a notmuch-wash button.
+    (when (and button (/= part-beg end) (button-get button :base-label))
+      (button-put button 'overlay (make-overlay part-beg end))
+      ;; We toggle the button for hidden parts as that gets the
+      ;; button label right.
+      (save-excursion
+	(when hide
+	  (notmuch-show-toggle-part-invisibility button))))))
+
+(defun notmuch-show-insert-bodypart (msg part depth &optional hide)
+  "Insert the body part PART at depth DEPTH in the current thread.
+
+If HIDE is non-nil then initially hide this part."
   (let ((content-type (downcase (plist-get part :content-type)))
-	(nth (plist-get part :id)))
-    (notmuch-show-insert-bodypart-internal msg part content-type nth depth content-type))
-  ;; Some of the body part handlers leave point somewhere up in the
-  ;; part, so we make sure that we're down at the end.
-  (goto-char (point-max))
-  ;; Ensure that the part ends with a carriage return.
-  (unless (bolp)
-    (insert "\n")))
+	(nth (plist-get part :id))
+	(beg (point)))
+
+    (notmuch-show-insert-bodypart-internal msg part content-type nth depth content-type)
+    ;; Some of the body part handlers leave point somewhere up in the
+    ;; part, so we make sure that we're down at the end.
+    (goto-char (point-max))
+    ;; Ensure that the part ends with a carriage return.
+    (unless (bolp)
+      (insert "\n"))
+    (notmuch-show-create-part-overlays msg beg (point) hide)))
 
 (defun notmuch-show-insert-body (msg body depth)
   "Insert the body BODY at depth DEPTH in the current thread."
@@ -852,26 +911,7 @@ message at DEPTH in the current thread."
 	 message-start message-end
 	 content-start content-end
 	 headers-start headers-end
-	 body-start body-end
-	 (headers-invis-spec (notmuch-show-make-symbol "header"))
-	 (message-invis-spec (notmuch-show-make-symbol "message"))
 	 (bare-subject (notmuch-show-strip-re (plist-get headers :Subject))))
-
-    ;; Set `buffer-invisibility-spec' to `nil' (a list), otherwise
-    ;; removing items from `buffer-invisibility-spec' (which is what
-    ;; `notmuch-show-headers-visible' and
-    ;; `notmuch-show-message-visible' do) is a no-op and has no
-    ;; effect. This caused threads with only matching messages to have
-    ;; those messages hidden initially because
-    ;; `buffer-invisibility-spec' stayed `t'.
-    ;;
-    ;; This needs to be set here (rather than just above the call to
-    ;; `notmuch-show-headers-visible') because some of the part
-    ;; rendering or body washing functions
-    ;; (e.g. `notmuch-wash-text/plain-citations') manipulate
-    ;; `buffer-invisibility-spec').
-    (when (eq buffer-invisibility-spec t)
-      (setq buffer-invisibility-spec nil))
 
     (setq message-start (point-marker))
 
@@ -883,9 +923,6 @@ message at DEPTH in the current thread."
 				    (plist-get msg :tags) depth)
 
     (setq content-start (point-marker))
-
-    (plist-put msg :headers-invis-spec headers-invis-spec)
-    (plist-put msg :message-invis-spec message-invis-spec)
 
     ;; Set `headers-start' to point after the 'Subject:' header to be
     ;; compatible with the existing implementation. This just sets it
@@ -904,7 +941,6 @@ message at DEPTH in the current thread."
 
     (setq notmuch-show-previous-subject bare-subject)
 
-    (setq body-start (point-marker))
     ;; A blank line between the headers and the body.
     (insert "\n")
     (notmuch-show-insert-body msg (plist-get msg :body)
@@ -912,7 +948,6 @@ message at DEPTH in the current thread."
     ;; Ensure that the body ends with a newline.
     (unless (bolp)
       (insert "\n"))
-    (setq body-end (point-marker))
     (setq content-end (point-marker))
 
     ;; Indent according to the depth in the thread.
@@ -925,11 +960,9 @@ message at DEPTH in the current thread."
     ;; message.
     (put-text-property message-start message-end :notmuch-message-extent (cons message-start message-end))
 
-    (let ((headers-overlay (make-overlay headers-start headers-end))
-          (invis-specs (list headers-invis-spec message-invis-spec)))
-      (overlay-put headers-overlay 'invisible invis-specs)
-      (overlay-put headers-overlay 'priority 10))
-    (overlay-put (make-overlay body-start body-end) 'invisible message-invis-spec)
+    ;; Create overlays used to control visibility
+    (plist-put msg :headers-overlay (make-overlay headers-start headers-end))
+    (plist-put msg :message-overlay (make-overlay headers-start content-end))
 
     (plist-put msg :depth depth)
 
@@ -991,23 +1024,62 @@ message at DEPTH in the current thread."
   "Insert the forest of threads FOREST."
   (mapc (lambda (thread) (notmuch-show-insert-thread thread 0)) forest))
 
+(defvar notmuch-id-regexp
+  (concat
+   ;; Match the id: prefix only if it begins a word (to disallow, for
+   ;; example, matching cid:).
+   "\\<id:\\("
+   ;; If the term starts with a ", then parse Xapian's quoted boolean
+   ;; term syntax, which allows for anything as long as embedded
+   ;; double quotes escaped by doubling them.  We also disallow
+   ;; newlines (which Xapian allows) to prevent runaway terms.
+   "\"\\([^\"\n]\\|\"\"\\)*\""
+   ;; Otherwise, parse Xapian's unquoted syntax, which goes up to the
+   ;; next space or ).  We disallow [.,;] as the last character
+   ;; because these are probably part of the surrounding text, and not
+   ;; part of the id.  This doesn't match single character ids; meh.
+   "\\|[^\"[:space:])][^[:space:])]*[^])[:space:].,:;?!]"
+   "\\)")
+  "The regexp used to match id: links in messages.")
+
+(defvar notmuch-mid-regexp
+  ;; goto-address-url-regexp matched cid: links, which have the same
+  ;; grammar as the message ID part of a mid: link.  Construct the
+  ;; regexp using the same technique as goto-address-url-regexp.
+  (concat "\\<mid:\\(" thing-at-point-url-path-regexp "\\)")
+  "The regexp used to match mid: links in messages.
+
+See RFC 2392.")
+
 (defun notmuch-show-buttonise-links (start end)
   "Buttonise URLs and mail addresses between START and END.
 
-This also turns id:\"<message id>\"-parts into buttons for
-a corresponding notmuch search."
+This also turns id:\"<message id>\"-parts and mid: links into
+buttons for a corresponding notmuch search."
   (goto-address-fontify-region start end)
   (save-excursion
-    (goto-char start)
-    (while (re-search-forward "id:\\(\"?\\)[^[:space:]\"]+\\1" end t)
-      ;; remove the overlay created by goto-address-mode
-      (remove-overlays (match-beginning 0) (match-end 0) 'goto-address t)
-      (make-text-button (match-beginning 0) (match-end 0)
-			'action `(lambda (arg)
-				   (notmuch-show ,(match-string-no-properties 0)))
-			'follow-link t
-			'help-echo "Mouse-1, RET: search for this message"
-			'face goto-address-mail-face))))
+    (let (links)
+      (goto-char start)
+      (while (re-search-forward notmuch-id-regexp end t)
+	(push (list (match-beginning 0) (match-end 0)
+		    (match-string-no-properties 0)) links))
+      (goto-char start)
+      (while (re-search-forward notmuch-mid-regexp end t)
+	(let* ((mid-cid (match-string-no-properties 1))
+	       (mid (save-match-data
+		      (string-match "^[^/]*" mid-cid)
+		      (url-unhex-string (match-string 0 mid-cid)))))
+	  (push (list (match-beginning 0) (match-end 0)
+		      (notmuch-id-to-query mid)) links)))
+      (dolist (link links)
+	;; Remove the overlay created by goto-address-mode
+	(remove-overlays (first link) (second link) 'goto-address t)
+	(make-text-button (first link) (second link)
+			  'action `(lambda (arg)
+				     (notmuch-show ,(third link)))
+			  'follow-link t
+			  'help-echo "Mouse-1, RET: search for this message"
+			  'face goto-address-mail-face)))))
 
 ;;;###autoload
 (defun notmuch-show (thread-id &optional parent-buffer query-context buffer-name)
@@ -1126,6 +1198,10 @@ reset based on the original query."
   (let ((inhibit-read-only t)
 	(state (unless reset-state
 		 (notmuch-show-capture-state))))
+    ;; erase-buffer does not seem to remove overlays, which can lead
+    ;; to weird effects such as remaining images, so remove them
+    ;; manually.
+    (remove-overlays)
     (erase-buffer)
     (notmuch-show-build-buffer)
     (if state
@@ -1286,18 +1362,12 @@ effects."
 ;; Functions relating to the visibility of messages and their
 ;; components.
 
-(defun notmuch-show-element-visible (props visible-p spec-property)
-  (let ((spec (plist-get props spec-property)))
-    (if visible-p
-	(remove-from-invisibility-spec spec)
-      (add-to-invisibility-spec spec))))
-
 (defun notmuch-show-message-visible (props visible-p)
-  (notmuch-show-element-visible props visible-p :message-invis-spec)
+  (overlay-put (plist-get props :message-overlay) 'invisible (not visible-p))
   (notmuch-show-set-prop :message-visible visible-p props))
 
 (defun notmuch-show-headers-visible (props visible-p)
-  (notmuch-show-element-visible props visible-p :headers-invis-spec)
+  (overlay-put (plist-get props :headers-overlay) 'invisible (not visible-p))
   (notmuch-show-set-prop :headers-visible visible-p props))
 
 ;; Functions for setting and getting attributes of the current
@@ -1842,10 +1912,16 @@ thread from search."
   (interactive)
   (notmuch-common-do-stash (notmuch-show-get-from)))
 
-(defun notmuch-show-stash-message-id ()
-  "Copy id: query matching the current message to kill-ring."
-  (interactive)
-  (notmuch-common-do-stash (notmuch-show-get-message-id)))
+(defun notmuch-show-stash-message-id (&optional stash-thread-id)
+  "Copy id: query matching the current message to kill-ring.
+
+If invoked with a prefix argument (or STASH-THREAD-ID is
+non-nil), copy thread: query matching the current thread to
+kill-ring."
+  (interactive "P")
+  (if stash-thread-id
+      (notmuch-common-do-stash notmuch-show-thread-id)
+    (notmuch-common-do-stash (notmuch-show-get-message-id))))
 
 (defun notmuch-show-stash-message-id-stripped ()
   "Copy message ID of current message (sans `id:' prefix) to kill-ring."
@@ -1901,7 +1977,10 @@ the user (see `notmuch-show-stash-mlarchive-link-alist')."
 
 (defun notmuch-show-part-button-default (&optional button)
   (interactive)
-  (notmuch-show-part-button-internal button notmuch-show-part-button-default-action))
+  (let ((button (or button (button-at (point)))))
+    (if (button-get button 'overlay)
+	(notmuch-show-toggle-part-invisibility button)
+      (notmuch-show-part-button-internal button notmuch-show-part-button-default-action))))
 
 (defun notmuch-show-part-button-save (&optional button)
   (interactive)

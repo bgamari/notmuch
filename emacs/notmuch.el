@@ -536,19 +536,13 @@ If BARE is set then do not prefix with \"thread:\""
 (defun notmuch-call-notmuch-process (&rest args)
   "Synchronously invoke \"notmuch\" with the given list of arguments.
 
-Output from the process will be presented to the user as an error
-and will also appear in a buffer named \"*Notmuch errors*\"."
-  (let ((error-buffer (get-buffer-create "*Notmuch errors*")))
-    (with-current-buffer error-buffer
-	(erase-buffer))
-    (if (eq (apply 'call-process notmuch-command nil error-buffer nil args) 0)
-	(point)
-      (progn
-	(with-current-buffer error-buffer
-	  (let ((beg (point-min))
-		(end (- (point-max) 1)))
-	    (error (buffer-substring beg end))
-	    ))))))
+If notmuch exits with a non-zero status, output from the process
+will appear in a buffer named \"*Notmuch errors*\" and an error
+will be signaled."
+  (with-temp-buffer
+    (let ((status (apply #'call-process notmuch-command nil t nil args)))
+      (notmuch-check-exit-status status (cons notmuch-command args)
+				 (buffer-string)))))
 
 (defun notmuch-search-set-tags (tags &optional pos)
   (let ((new-result (plist-put (notmuch-search-get-result pos) :tags tags)))
@@ -644,6 +638,7 @@ of the result."
 	(exit-status (process-exit-status proc))
 	(never-found-target-thread nil))
     (when (memq status '(exit signal))
+      (catch 'return
 	(kill-buffer (process-get proc 'parse-buf))
 	(if (buffer-live-p buffer)
 	    (with-current-buffer buffer
@@ -654,17 +649,23 @@ of the result."
 		  (if (eq status 'signal)
 		      (insert "Incomplete search results (search process was killed).\n"))
 		  (when (eq status 'exit)
-		    (insert "End of search results.")
-		    (unless (= exit-status 0)
-		      (insert (format " (process returned %d)" exit-status)))
-		    (insert "\n")
+		    (insert "End of search results.\n")
+		    ;; For version mismatch, there's no point in
+		    ;; showing the search buffer
+		    (when (or (= exit-status 20) (= exit-status 21))
+		      (kill-buffer))
+		    (condition-case nil
+			(notmuch-check-async-exit-status proc msg)
+		      ;; Suppress the error signal since strange
+		      ;; things happen if a sentinel signals.
+		      (error (throw 'return nil)))
 		    (if (and atbob
 			     (not (string= notmuch-search-target-thread "found")))
 			(set 'never-found-target-thread t)))))
 	      (when (and never-found-target-thread
 		       notmuch-search-target-line)
 		  (goto-char (point-min))
-		  (forward-line (1- notmuch-search-target-line))))))))
+		  (forward-line (1- notmuch-search-target-line)))))))))
 
 (defcustom notmuch-search-line-faces '(("unread" :weight bold)
 				       ("flagged" :foreground "blue"))
@@ -938,7 +939,7 @@ Other optional parameters are used as follows:
 	(let ((proc (start-process
 		     "notmuch-search" buffer
 		     notmuch-command "search"
-		     "--format=json"
+		     "--format=json" "--format-version=1"
 		     (if oldest-first
 			 "--sort=oldest-first"
 		       "--sort=newest-first")

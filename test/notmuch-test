@@ -31,6 +31,7 @@ TESTS="
   excludes
   tagging
   json
+  sexp
   text
   multipart
   thread-naming
@@ -60,6 +61,7 @@ TESTS="
   emacs-hello
   emacs-show
   missing-headers
+  hex-escaping
   parse-time-string
   search-date
 "
@@ -81,6 +83,12 @@ trap 'e=$?; kill $!; exit $e' HUP INT TERM
 for test in $TESTS; do
     $TEST_TIMEOUT_CMD ./$test "$@" &
     wait $!
+    # If the test failed without producing results, then it aborted,
+    # so we should abort, too.
+    RES=$?
+    if [[ $RES != 0 && ! -e "test-results/${test%.sh}" ]]; then
+        exit $RES
+    fi
 done
 trap - HUP INT TERM
 
