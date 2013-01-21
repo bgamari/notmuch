@@ -1,3 +1,44 @@
+notmuch (0.15-2) experimental; urgency=low
+
+  * Disable tests until a proper fix for running tests without a
+    proper TERM value is developed (again).
+
+ -- David Bremner <bremner@debian.org>  Sun, 20 Jan 2013 18:36:16 -0400
+
+notmuch (0.15-1) experimental; urgency=low
+
+  * New upstream release.
+    - Date range search support
+    - Empty tag names and tags beginning with "-" are deprecated
+    - Support for single message mboxes is deprecated
+    - Fixed `notmuch new` to skip ignored broken symlinks
+    - New dump/restore format and tagging interface
+    - Emacs Interface
+      - Removal of the deprecated `notmuch-folders` variable
+      - Visibility of MIME parts can be toggled
+      - Emacs now buttonizes mid: links
+      - Improved text/calendar content handling
+      - Disabled coding conversions when reading
+      - Fixed errors with HTML email containing images in Emacs 24
+      - Fixed handling of tags with unusual characters in them
+      - Fixed buttonization of id: links without quote characters
+      - Automatic tag changes are now unified and customizable
+      - Support for stashing the thread id in show view
+      - New add-on tool: notmuch-pick
+
+ -- David Bremner <bremner@debian.org>  Fri, 18 Jan 2013 21:23:36 -0400
+
+notmuch (0.15~rc1-1) experimental; urgency=low
+
+  * New upstream release candidate.
+  * Change priority to optional (Closes: #687217).
+  * Remove Dm-Upload-Allowed field, as this is no longer used by
+    Debian.
+  * Add python3 bindings, thanks to Jakub Wilk (Closes: #683515).
+  * Bug fix: ".ical attachment problem", (Closes: #688747).
+
+ -- David Bremner <bremner@debian.org>  Wed, 16 Jan 2013 08:28:27 -0400
+
 notmuch (0.14-1) experimental; urgency=low
 
   [ Stefano Zacchiroli ]

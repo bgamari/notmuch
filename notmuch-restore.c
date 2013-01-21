@@ -26,7 +26,8 @@
 static regex_t regex;
 
 /* Non-zero return indicates an error in retrieving the message,
- * or in applying the tags.
+ * or in applying the tags.  Missing messages are reported, but not
+ * considered errors.
  */
 static int
 tag_message (unused (void *ctx),
@@ -40,12 +41,16 @@ tag_message (unused (void *ctx),
     int ret = 0;
 
     status = notmuch_database_find_message (notmuch, message_id, &message);
-    if (status || message == NULL) {
-	fprintf (stderr, "Warning: cannot apply tags to %smessage: %s\n",
-		 message ? "" : "missing ", message_id);
-	if (status)
-	    fprintf (stderr, "%s\n", notmuch_status_to_string (status));
+    if (status) {
+	fprintf (stderr, "Error applying tags to message %s: %s\n",
+		 message_id, notmuch_status_to_string (status));
 	return 1;
+    }
+    if (message == NULL) {
+	fprintf (stderr, "Warning: cannot apply tags to missing message: %s\n",
+		 message_id);
+	/* We consider this a non-fatal error. */
+	return 0;
     }
 
     /* In order to detect missing messages, this check/optimization is
@@ -181,11 +186,6 @@ notmuch_restore_command (unused (void *ctx), int argc, char *argv[])
 		 argv[opt_index]);
 	return 1;
     }
-    char *p;
-
-    line_len = getline (&line, &line_size, input);
-    if (line_len == 0)
-	return 0;
 
     tag_ops = tag_op_list_create (ctx);
     if (tag_ops == NULL) {
@@ -193,6 +193,19 @@ notmuch_restore_command (unused (void *ctx), int argc, char *argv[])
 	return 1;
     }
 
+    do {
+	line_len = getline (&line, &line_size, input);
+
+	/* empty input file not considered an error */
+	if (line_len < 0)
+	    return 0;
+
+    } while ((line_len == 0) ||
+	     (line[0] == '#') ||
+	     /* the cast is safe because we checked about for line_len < 0 */
+	     (strspn (line, " \t\n") == (unsigned)line_len));
+
+    char *p;
     for (p = line; (input_format == DUMP_FORMAT_AUTO) && *p; p++) {
 	if (*p == '(')
 	    input_format = DUMP_FORMAT_SUP;
@@ -208,7 +221,7 @@ notmuch_restore_command (unused (void *ctx), int argc, char *argv[])
 	    INTERNAL_ERROR ("compile time constant regex failed.");
 
     do {
-	char *query_string;
+	char *query_string, *prefix, *term;
 
 	if (line_ctx != NULL)
 	    talloc_free (line_ctx);
@@ -221,19 +234,22 @@ notmuch_restore_command (unused (void *ctx), int argc, char *argv[])
 				  &query_string, tag_ops);
 
 	    if (ret == 0) {
-		if (strncmp ("id:", query_string, 3) != 0) {
-		    fprintf (stderr, "Warning: unsupported query: %s\n", query_string);
+		ret = parse_boolean_term (line_ctx, query_string,
+					  &prefix, &term);
+		if (ret && errno == EINVAL) {
+		    fprintf (stderr, "Warning: cannot parse query: %s (skipping)\n", query_string);
+		    continue;
+		} else if (ret) {
+		    /* This is more fatal (e.g., out of memory) */
+		    fprintf (stderr, "Error parsing query: %s\n",
+			     strerror (errno));
+		    ret = 1;
+		    break;
+		} else if (strcmp ("id", prefix) != 0) {
+		    fprintf (stderr, "Warning: not an id query: %s (skipping)\n", query_string);
 		    continue;
 		}
-		/* delete id: from front of string; tag_message
-		 * expects a raw message-id.
-		 *
-		 * XXX: Note that query string id:foo and bar will be
-		 * interpreted as a message id "foo and bar". This
-		 * should eventually be fixed to give a better error
-		 * message.
-		 */
-		query_string = query_string + 3;
+		query_string = term;
 	    }
 	}
 

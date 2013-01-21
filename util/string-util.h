@@ -19,4 +19,35 @@
 
 char *strtok_len (char *s, const char *delim, size_t *len);
 
+/* Construct a boolean term query with the specified prefix (e.g.,
+ * "id") and search term, quoting term as necessary.  Specifically, if
+ * term contains any non-printable ASCII characters, non-ASCII
+ * characters, close parenthesis or double quotes, it will be enclosed
+ * in double quotes and any internal double quotes will be doubled
+ * (e.g. a"b -> "a""b").  The result will be a valid notmuch query and
+ * can be parsed by parse_boolean_term.
+ *
+ * Output is into buf; it may be talloc_realloced.
+ * Return: 0 on success, -1 on error.  errno will be set to ENOMEM if
+ * there is an allocation failure.
+ */
+int make_boolean_term (void *talloc_ctx, const char *prefix, const char *term,
+		       char **buf, size_t *len);
+
+/* Parse a boolean term query consisting of a prefix, a colon, and a
+ * term that may be quoted as described for make_boolean_term.  If the
+ * term is not quoted, then it ends at the first whitespace or close
+ * parenthesis.  str may containing leading or trailing whitespace,
+ * but anything else is considered a parse error.  This is compatible
+ * with anything produced by make_boolean_term, and supports a subset
+ * of the quoting styles supported by Xapian (and hence notmuch).
+ * *prefix_out and *term_out will be talloc'd with context ctx.
+ *
+ * Return: 0 on success, -1 on error.  errno will be set to EINVAL if
+ * there is a parse error or ENOMEM if there is an allocation failure.
+ */
+int
+parse_boolean_term (void *ctx, const char *str,
+		    char **prefix_out, char **term_out);
+
 #endif

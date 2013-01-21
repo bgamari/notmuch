@@ -1,4 +1,4 @@
-Notmuch 0.15 (YYYY-MM-DD)
+Notmuch 0.15 (2013-01-18)
 =========================
 
 General
@@ -41,6 +41,16 @@ Fixed `notmuch new` to skip ignored broken symlinks
   ignored files list.  Previously, it would abort when encountering
   broken symlink, even if it was ignored.
 
+New dump/restore format and tagging interface
+
+  There is a new `batch-tag` format for dump and restore that is more
+  robust, particularly with respect to tags and message-ids containing
+  whitespace.
+
+  `notmuch tag` now supports the ability to read tag operations and
+  queries from an input stream, in a format compatible with the new
+  dump/restore format.
+
 Bcc and Reply-To headers are now available in notmuch show json output
 
   The `notmuch show --format=json` now includes "Bcc" and "Reply-To" headers.
@@ -80,6 +90,10 @@ Visibility of MIME parts can be toggled
   the behavior of this, see
   `notmuch-multipart/alternative-discouraged` and
   `notmuch-show-all-multipart/alternative-parts`.
+
+  Note notmuch-show-print-message (bound to '#' by default) will print
+  all parts of multipart/alternative message regardless of whether
+  they are currently hidden or shown in the buffer.
 
 Emacs now buttonizes mid: links
 

@@ -20,6 +20,7 @@
 
 #include "notmuch-client.h"
 #include "dump-restore-private.h"
+#include "string-util.h"
 
 int
 notmuch_dump_command (unused (void *ctx), int argc, char *argv[])
@@ -102,6 +103,18 @@ notmuch_dump_command (unused (void *ctx), int argc, char *argv[])
 	message = notmuch_messages_get (messages);
 	message_id = notmuch_message_get_message_id (message);
 
+	if (output_format == DUMP_FORMAT_BATCH_TAG &&
+	    strchr (message_id, '\n')) {
+	    /* This will produce a line break in the output, which
+	     * would be difficult to handle in tools.  However, it's
+	     * also impossible to produce an email containing a line
+	     * break in a message ID because of unfolding, so we can
+	     * safely disallow it. */
+	    fprintf (stderr, "Warning: skipping message id containing line break: \"%s\"\n", message_id);
+	    notmuch_message_destroy (message);
+	    continue;
+	}
+
 	if (output_format == DUMP_FORMAT_SUP) {
 	    fprintf (output, "%s (", message_id);
 	}
@@ -132,13 +145,13 @@ notmuch_dump_command (unused (void *ctx), int argc, char *argv[])
 	if (output_format == DUMP_FORMAT_SUP) {
 	    fputs (")\n", output);
 	} else {
-	    if (hex_encode (notmuch, message_id,
-			    &buffer, &buffer_size) != HEX_SUCCESS) {
-		    fprintf (stderr, "Error: failed to hex-encode msg-id %s\n",
-			     message_id);
+	    if (make_boolean_term (notmuch, "id", message_id,
+				   &buffer, &buffer_size)) {
+		    fprintf (stderr, "Error quoting message id %s: %s\n",
+			     message_id, strerror (errno));
 		    return 1;
 	    }
-	    fprintf (output, " -- id:%s\n", buffer);
+	    fprintf (output, " -- %s\n", buffer);
 	}
 
 	notmuch_message_destroy (message);

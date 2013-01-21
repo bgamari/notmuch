@@ -31,6 +31,31 @@ line_error (tag_parse_status_t status,
     return status;
 }
 
+/*
+ * Test tags for some forbidden cases.
+ *
+ * return: NULL if OK,
+ *	   explanatory message otherwise.
+ */
+
+static const char *
+illegal_tag (const char *tag, notmuch_bool_t remove)
+{
+
+    if (*tag == '\0' && ! remove)
+	return "empty tag forbidden";
+
+    /* This disallows adding tags starting with "-", in particular the
+     * non-removable tag "-" and enables notmuch tag to take long
+     * options more easily.
+     */
+
+    if (*tag == '-' && ! remove)
+	return "tag starting with '-' forbidden";
+
+    return NULL;
+}
+
 tag_parse_status_t
 parse_tag_line (void *ctx, char *line,
 		tag_op_flag_t flags,
@@ -95,11 +120,13 @@ parse_tag_line (void *ctx, char *line,
 	remove = (*tok == '-');
 	tag = tok + 1;
 
-	/* Maybe refuse empty tags. */
-	if (! (flags & TAG_FLAG_BE_GENEROUS) && *tag == '\0') {
-	    ret = line_error (TAG_PARSE_INVALID, line_for_error,
-			      "empty tag");
-	    goto DONE;
+	/* Maybe refuse illegal tags. */
+	if (! (flags & TAG_FLAG_BE_GENEROUS)) {
+	    const char *msg = illegal_tag (tag, remove);
+	    if (msg) {
+		ret = line_error (TAG_PARSE_INVALID, line_for_error, msg);
+		goto DONE;
+	    }
 	}
 
 	/* Decode tag. */
@@ -124,18 +151,58 @@ parse_tag_line (void *ctx, char *line,
     }
 
     /* tok now points to the query string */
-    if (hex_decode_inplace (tok) != HEX_SUCCESS) {
-	ret = line_error (TAG_PARSE_INVALID, line_for_error,
-			  "hex decoding of query %s failed", tok);
-	goto DONE;
-    }
-
     *query_string = tok;
 
   DONE:
     talloc_free (line_for_error);
     return ret;
 }
+
+tag_parse_status_t
+parse_tag_command_line (void *ctx, int argc, char **argv,
+			char **query_str, tag_op_list_t *tag_ops)
+{
+
+    int i;
+
+    tag_op_list_reset (tag_ops);
+
+    for (i = 0; i < argc; i++) {
+	if (strcmp (argv[i], "--") == 0) {
+	    i++;
+	    break;
+	}
+
+	if (argv[i][0] != '+' && argv[i][0] != '-')
+	    break;
+
+	notmuch_bool_t is_remove = argv[i][0] == '-';
+	const char *msg;
+
+	msg = illegal_tag (argv[i] + 1, is_remove);
+	if (msg) {
+	    fprintf (stderr, "Error: %s", msg);
+	    return TAG_PARSE_INVALID;
+	}
+
+	tag_op_list_append (tag_ops, argv[i] + 1, is_remove);
+    }
+
+    if (tag_op_list_size (tag_ops) == 0) {
+	fprintf (stderr, "Error: 'notmuch tag' requires at least one tag to add or remove.\n");
+	return TAG_PARSE_INVALID;
+    }
+
+    *query_str = query_string_from_args (ctx, argc - i, &argv[i]);
+
+    if (*query_str == NULL || **query_str == '\0') {
+	fprintf (stderr, "Error: notmuch tag requires at least one search term.\n");
+	return TAG_PARSE_INVALID;
+    }
+
+    return TAG_PARSE_SUCCESS;
+}
+
 
 static inline void
 message_error (notmuch_message_t *message,
