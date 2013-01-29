@@ -31,18 +31,6 @@ typedef struct command {
     const char *summary;
 } command_t;
 
-#define MAX_ALIAS_SUBSTITUTIONS 3
-
-typedef struct alias {
-    const char *name;
-    const char *substitutions[MAX_ALIAS_SUBSTITUTIONS];
-} alias_t;
-
-alias_t aliases[] = {
-    { "part", { "show", "--format=raw"}},
-    { "search-tags", {"search", "--output=tags", "*"}}
-};
-
 static int
 notmuch_help_command (void *ctx, int argc, char *argv[]);
 
@@ -260,9 +248,15 @@ main (int argc, char *argv[])
 {
     void *local;
     command_t *command;
-    alias_t *alias;
-    unsigned int i, j;
-    const char **argv_local;
+    unsigned int i;
+    notmuch_bool_t print_help=FALSE, print_version=FALSE;
+    int opt_index;
+
+    notmuch_opt_desc_t options[] = {
+	{ NOTMUCH_OPT_BOOLEAN, &print_help, "help", 'h', 0 },
+	{ NOTMUCH_OPT_BOOLEAN, &print_version, "version", 'v', 0 },
+	{ 0, 0, 0, 0, 0 }
+    };
 
     talloc_enable_null_tracking ();
 
@@ -277,56 +271,28 @@ main (int argc, char *argv[])
     if (argc == 1)
 	return notmuch (local);
 
-    if (strcmp (argv[1], "--help") == 0)
-	return notmuch_help_command (NULL, argc - 1, &argv[1]);
-
-    if (strcmp (argv[1], "--version") == 0) {
-	printf ("notmuch " STRINGIFY(NOTMUCH_VERSION) "\n");
-	return 0;
+    opt_index = parse_arguments (argc, argv, options, 1);
+    if (opt_index < 0) {
+	/* diagnostics already printed */
+	return 1;
     }
 
-    for (i = 0; i < ARRAY_SIZE (aliases); i++) {
-	alias = &aliases[i];
+    if (print_help)
+	return notmuch_help_command (NULL, argc - 1, &argv[1]);
 
-	if (strcmp (argv[1], alias->name) == 0)
-	{
-	    int substitutions;
-
-	    argv_local = talloc_size (local, sizeof (char *) *
-				      (argc + MAX_ALIAS_SUBSTITUTIONS - 1));
-	    if (argv_local == NULL) {
-		fprintf (stderr, "Out of memory.\n");
-		return 1;
-	    }
-
-	    /* Copy all substution arguments from the alias. */
-	    argv_local[0] = argv[0];
-	    for (j = 0; j < MAX_ALIAS_SUBSTITUTIONS; j++) {
-		if (alias->substitutions[j] == NULL)
-		    break;
-		argv_local[j+1] = alias->substitutions[j];
-	    }
-	    substitutions = j;
-
-	    /* And copy all original arguments (skipping the argument
-	     * that matched the alias of course. */
-	    for (j = 2; j < (unsigned) argc; j++) {
-		argv_local[substitutions+j-1] = argv[j];
-	    }
-
-	    argc += substitutions - 1;
-	    argv = (char **) argv_local;
-	}
+    if (print_version) {
+	printf ("notmuch " STRINGIFY(NOTMUCH_VERSION) "\n");
+	return 0;
     }
 
     for (i = 0; i < ARRAY_SIZE (commands); i++) {
 	command = &commands[i];
 
-	if (strcmp (argv[1], command->name) == 0) {
+	if (strcmp (argv[opt_index], command->name) == 0) {
 	    int ret;
 	    char *talloc_report;
 
-	    ret = (command->function)(local, argc - 1, &argv[1]);
+	    ret = (command->function)(local, argc - opt_index, argv + opt_index);
 
 	    /* in the future support for this environment variable may
 	     * be supplemented or replaced by command line arguments
