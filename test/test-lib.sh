@@ -194,22 +194,39 @@ test_fixed=0
 test_broken=0
 test_success=0
 
-die () {
+_die_common () {
 	code=$?
+	trap - EXIT
+	set +ex
 	rm -rf "$TEST_TMPDIR"
+}
+
+die () {
+	_die_common
 	if test -n "$GIT_EXIT_OK"
 	then
 		exit $code
 	else
-		echo >&5 "FATAL: Unexpected exit with code $code"
+		exec >&5
+		say_color error '%-6s' FATAL
+		echo " $test_subtest_name"
+		echo
+		echo "Unexpected exit while executing $0. Exit code $code."
 		exit 1
 	fi
+}
+
+die_signal () {
+	_die_common
+	echo >&5 "FATAL: $0: interrupted by signal" $((code - 128))
+	exit $code
 }
 
 GIT_EXIT_OK=
 # Note: TEST_TMPDIR *NOT* exported!
 TEST_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/notmuch-test-$$.XXXXXX")
 trap 'die' EXIT
+trap 'die_signal' HUP INT TERM
 
 test_decode_color () {
 	sed	-e 's/.\[1m/<WHITE>/g' \
@@ -498,12 +515,12 @@ test_expect_equal ()
 	if ! test_skip "$test_subtest_name"
 	then
 		if [ "$output" = "$expected" ]; then
-			test_ok_ "$test_subtest_name"
+			test_ok_
 		else
 			testname=$this_test.$test_count
 			echo "$expected" > $testname.expected
 			echo "$output" > $testname.output
-			test_failure_ "$test_subtest_name" "$(diff -u $testname.expected $testname.output)"
+			test_failure_ "$(diff -u $testname.expected $testname.output)"
 		fi
     fi
 }
@@ -524,12 +541,12 @@ test_expect_equal_file ()
 	if ! test_skip "$test_subtest_name"
 	then
 		if diff -q "$file1" "$file2" >/dev/null ; then
-			test_ok_ "$test_subtest_name"
+			test_ok_
 		else
 			testname=$this_test.$test_count
 			cp "$file1" "$testname.$basename1"
 			cp "$file2" "$testname.$basename2"
-			test_failure_ "$test_subtest_name" "$(diff -u "$testname.$basename1" "$testname.$basename2")"
+			test_failure_ "$(diff -u "$testname.$basename1" "$testname.$basename2")"
 		fi
     fi
 }
@@ -567,9 +584,9 @@ test_emacs_expect_t () {
 		result=$(cat OUTPUT)
 		if [ "$result" = t ]
 		then
-			test_ok_ "$test_subtest_name"
+			test_ok_
 		else
-			test_failure_ "$test_subtest_name" "${result}"
+			test_failure_ "${result}"
 		fi
 	else
 		# Restore state after the (non) test.
@@ -670,12 +687,12 @@ test_require_external_prereq () {
 
 test_ok_ () {
 	if test "$test_subtest_known_broken_" = "t"; then
-		test_known_broken_ok_ "$@"
+		test_known_broken_ok_
 		return
 	fi
 	test_success=$(($test_success + 1))
 	say_color pass "%-6s" "PASS"
-	echo " $@"
+	echo " $test_subtest_name"
 }
 
 test_failure_ () {
@@ -684,7 +701,7 @@ test_failure_ () {
 		return
 	fi
 	test_failure=$(($test_failure + 1))
-	test_failure_message_ "FAIL" "$@"
+	test_failure_message_ "FAIL" "$test_subtest_name" "$@"
 	test "$immediate" = "" || { GIT_EXIT_OK=t; exit 1; }
 	return 1
 }
@@ -701,13 +718,13 @@ test_known_broken_ok_ () {
 	test_reset_state_
 	test_fixed=$(($test_fixed+1))
 	say_color pass "%-6s" "FIXED"
-	echo " $@"
+	echo " $test_subtest_name"
 }
 
 test_known_broken_failure_ () {
 	test_reset_state_
 	test_broken=$(($test_broken+1))
-	test_failure_message_ "BROKEN" "$@"
+	test_failure_message_ "BROKEN" "$test_subtest_name" "$@"
 	return 1
 }
 
@@ -775,6 +792,7 @@ test_expect_success () {
 	test "$#" = 3 && { prereq=$1; shift; } || prereq=
 	test "$#" = 2 ||
 	error "bug in the test script: not 2 or 3 parameters to test-expect-success"
+	test_subtest_name="$1"
 	test_reset_state_
 	if ! test_skip "$@"
 	then
@@ -784,9 +802,9 @@ test_expect_success () {
 		test_check_missing_external_prereqs_ "$@" ||
 		if [ "$run_ret" = 0 -a "$eval_ret" = 0 ]
 		then
-			test_ok_ "$1"
+			test_ok_
 		else
-			test_failure_ "$@"
+			test_failure_ "$2"
 		fi
 	fi
 }
@@ -795,6 +813,7 @@ test_expect_code () {
 	test "$#" = 4 && { prereq=$1; shift; } || prereq=
 	test "$#" = 3 ||
 	error "bug in the test script: not 3 or 4 parameters to test-expect-code"
+	test_subtest_name="$2"
 	test_reset_state_
 	if ! test_skip "$@"
 	then
@@ -804,9 +823,9 @@ test_expect_code () {
 		test_check_missing_external_prereqs_ "$@" ||
 		if [ "$run_ret" = 0 -a "$eval_ret" = "$1" ]
 		then
-			test_ok_ "$2"
+			test_ok_
 		else
-			test_failure_ "$@"
+			test_failure_ "exit code $eval_ret, expected $1" "$3"
 		fi
 	fi
 }
@@ -823,10 +842,10 @@ test_external () {
 	test "$#" = 4 && { prereq=$1; shift; } || prereq=
 	test "$#" = 3 ||
 	error >&5 "bug in the test script: not 3 or 4 parameters to test_external"
-	descr="$1"
+	test_subtest_name="$1"
 	shift
 	test_reset_state_
-	if ! test_skip "$descr" "$@"
+	if ! test_skip "$test_subtest_name" "$@"
 	then
 		# Announce the script to reduce confusion about the
 		# test output that follows.
@@ -837,9 +856,9 @@ test_external () {
 		"$@" 2>&4
 		if [ "$?" = 0 ]
 		then
-			test_ok_ "$descr"
+			test_ok_
 		else
-			test_failure_ "$descr" "$@"
+			test_failure_ "$@"
 		fi
 	fi
 }
@@ -853,11 +872,11 @@ test_external_without_stderr () {
 	stderr="$tmp/git-external-stderr.$$.tmp"
 	test_external "$@" 4> "$stderr"
 	[ -f "$stderr" ] || error "Internal error: $stderr disappeared."
-	descr="no stderr: $1"
+	test_subtest_name="no stderr: $1"
 	shift
 	if [ ! -s "$stderr" ]; then
 		rm "$stderr"
-		test_ok_ "$descr"
+		test_ok_
 	else
 		if [ "$verbose" = t ]; then
 			output=`echo; echo Stderr is:; cat "$stderr"`
@@ -866,7 +885,7 @@ test_external_without_stderr () {
 		fi
 		# rm first in case test_failure exits.
 		rm "$stderr"
-		test_failure_ "$descr" "$@" "$output"
+		test_failure_ "$@" "$output"
 	fi
 }
 

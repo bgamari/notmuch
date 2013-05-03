@@ -16,7 +16,7 @@
 .\" along with this program.  If not, see http://www.gnu.org/licenses/ .
 .\"
 .\" Author: Carl Worth <cworth@cworth.org>
-.TH NOTMUCH 1 2013-01-24 "Notmuch 0.15.1"
+.TH NOTMUCH 1 2013-02-17 "Notmuch 0.15.2"
 .SH NAME
 notmuch \- thread-based email index, search, and tagging
 .SH SYNOPSIS
@@ -68,6 +68,15 @@ Print a synopsis of available commands and exit.
 .B \-\-version
 
 Print the installed version of notmuch, and exit.
+.RE
+
+.RS 4
+.TP 4
+.B \-\-config=FILE
+
+Specify the configuration file to use. This overrides any
+configuration file specified by ${NOTMUCH_CONFIG}.
+
 .RE
 
 .SH COMMANDS
@@ -154,6 +163,11 @@ Location to write a talloc memory usage report. See
 .B talloc_enable_leak_report_full
 in \fBtalloc\fR(3)
 for more information.
+
+.TP
+.B NOTMUCH_DEBUG_QUERY
+If set to a non-empty value, the notmuch library will print (to stderr) Xapian
+queries it constructs.
 
 .SH SEE ALSO
 

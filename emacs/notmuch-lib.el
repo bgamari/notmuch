@@ -97,13 +97,40 @@ For example, if you wanted to remove an \"inbox\" tag and add an
   :group 'notmuch-search
   :group 'notmuch-show)
 
+;; By default clicking on a button does not select the window
+;; containing the button (as opposed to clicking on a widget which
+;; does). This means that the button action is then executed in the
+;; current selected window which can cause problems if the button
+;; changes the buffer (e.g., id: links) or moves point.
+;;
+;; This provides a button type which overrides mouse-action so that
+;; the button's window is selected before the action is run. Other
+;; notmuch buttons can get the same behaviour by inheriting from this
+;; button type.
+(define-button-type 'notmuch-button-type
+  'mouse-action (lambda (button)
+		  (select-window (posn-window (event-start last-input-event)))
+		  (button-activate button)))
+
+(defun notmuch-command-to-string (&rest args)
+  "Synchronously invoke \"notmuch\" with the given list of arguments.
+
+If notmuch exits with a non-zero status, output from the process
+will appear in a buffer named \"*Notmuch errors*\" and an error
+will be signaled.
+
+Otherwise the output will be returned"
+  (with-temp-buffer
+    (let* ((status (apply #'call-process notmuch-command nil t nil args))
+	   (output (buffer-string)))
+      (notmuch-check-exit-status status (cons notmuch-command args) output)
+      output)))
+
 (defun notmuch-version ()
   "Return a string with the notmuch version number."
   (let ((long-string
 	 ;; Trim off the trailing newline.
-	 (substring (shell-command-to-string
-		     (concat notmuch-command " --version"))
-		    0 -1)))
+	 (substring (notmuch-command-to-string "--version") 0 -1)))
     (if (string-match "^notmuch\\( version\\)? \\(.*\\)$"
 		      long-string)
 	(match-string 2 long-string)
@@ -112,9 +139,7 @@ For example, if you wanted to remove an \"inbox\" tag and add an
 (defun notmuch-config-get (item)
   "Return a value from the notmuch configuration."
   ;; Trim off the trailing newline
-  (substring (shell-command-to-string
-	      (concat notmuch-command " config get " item))
-	      0 -1))
+  (substring (notmuch-command-to-string "config" "get" item) 0 -1))
 
 (defun notmuch-database-path ()
   "Return the database.path value from the notmuch configuration."
@@ -301,20 +326,52 @@ current buffer, if possible."
   (loop for (key value . rest) on plist by #'cddr
 	collect (cons (intern (substring (symbol-name key) 1)) value)))
 
-(defun notmuch-combine-face-text-property (start end face)
+(defun notmuch-face-ensure-list-form (face)
+  "Return FACE in face list form.
+
+If FACE is already a face list, it will be returned as-is.  If
+FACE is a face name or face plist, it will be returned as a
+single element face list."
+  (if (and (listp face) (not (keywordp (car face))))
+      face
+    (list face)))
+
+(defun notmuch-combine-face-text-property (start end face &optional below object)
   "Combine FACE into the 'face text property between START and END.
 
 This function combines FACE with any existing faces between START
-and END.  Attributes specified by FACE take precedence over
-existing attributes.  FACE must be a face name (a symbol or
-string), a property list of face attributes, or a list of these."
+and END in OBJECT (which defaults to the current buffer).
+Attributes specified by FACE take precedence over existing
+attributes unless BELOW is non-nil.  FACE must be a face name (a
+symbol or string), a property list of face attributes, or a list
+of these.  For convenience when applied to strings, this returns
+OBJECT."
 
-  (let ((pos start))
+  ;; A face property can have three forms: a face name (a string or
+  ;; symbol), a property list, or a list of these two forms.  In the
+  ;; list case, the faces will be combined, with the earlier faces
+  ;; taking precedent.  Here we canonicalize everything to list form
+  ;; to make it easy to combine.
+  (let ((pos start)
+	(face-list (notmuch-face-ensure-list-form face)))
     (while (< pos end)
-      (let ((cur (get-text-property pos 'face))
-	    (next (next-single-property-change pos 'face nil end)))
-	(put-text-property pos next 'face (cons face cur))
-	(setq pos next)))))
+      (let* ((cur (get-text-property pos 'face object))
+	     (cur-list (notmuch-face-ensure-list-form cur))
+	     (new (cond ((null cur-list) face)
+			(below (append cur-list face-list))
+			(t (append face-list cur-list))))
+	     (next (next-single-property-change pos 'face object end)))
+	(put-text-property pos next 'face new object)
+	(setq pos next))))
+  object)
+
+(defun notmuch-combine-face-text-property-string (string face &optional below)
+  (notmuch-combine-face-text-property
+   0
+   (length string)
+   face
+   below
+   string))
 
 (defun notmuch-logged-error (msg &optional extra)
   "Log MSG and EXTRA to *Notmuch errors* and signal MSG.

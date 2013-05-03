@@ -23,7 +23,7 @@
 
 (require 'coolj)
 
-(declare-function notmuch-show-insert-bodypart "notmuch-show" (msg part depth))
+(declare-function notmuch-show-insert-bodypart "notmuch-show" (msg part depth &optional hide))
 
 ;;
 
@@ -115,7 +115,8 @@ lower).")
 (define-button-type 'notmuch-wash-button-invisibility-toggle-type
   'action 'notmuch-wash-toggle-invisible-action
   'follow-link t
-  'face 'font-lock-comment-face)
+  'face 'font-lock-comment-face
+  :supertype 'notmuch-button-type)
 
 (define-button-type 'notmuch-wash-button-citation-toggle-type
   'help-echo "mouse-1, RET: Show citation"

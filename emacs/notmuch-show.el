@@ -38,7 +38,6 @@
 (require 'notmuch-print)
 
 (declare-function notmuch-call-notmuch-process "notmuch" (&rest args))
-(declare-function notmuch-fontify-headers "notmuch" nil)
 (declare-function notmuch-search-next-thread "notmuch" nil)
 (declare-function notmuch-search-show-thread "notmuch" nil)
 
@@ -362,8 +361,7 @@ operation on the contents of the current buffer."
     (if (re-search-forward "(\\([^()]*\\))$" (line-end-position) t)
 	(let ((inhibit-read-only t))
 	  (replace-match (concat "("
-				 (propertize (mapconcat 'identity tags " ")
-					     'face 'notmuch-tag-face)
+				 (notmuch-tag-format-tags tags)
 				 ")"))))))
 
 (defun notmuch-clean-address (address)
@@ -441,8 +439,7 @@ message at DEPTH in the current thread."
 	    " ("
 	    date
 	    ") ("
-	    (propertize (mapconcat 'identity tags " ")
-			'face 'notmuch-tag-face)
+	    (notmuch-tag-format-tags tags)
 	    ")\n")
     (overlay-put (make-overlay start (point)) 'face 'notmuch-message-summary-face)))
 
@@ -469,7 +466,8 @@ message at DEPTH in the current thread."
   'action 'notmuch-show-part-button-default
   'keymap 'notmuch-show-part-button-map
   'follow-link t
-  'face 'message-mml)
+  'face 'message-mml
+  :supertype 'notmuch-button-type)
 
 (defvar notmuch-show-part-button-map
   (let ((map (make-sparse-keymap)))
@@ -1085,6 +1083,7 @@ buttons for a corresponding notmuch search."
 	;; Remove the overlay created by goto-address-mode
 	(remove-overlays (first link) (second link) 'goto-address t)
 	(make-text-button (first link) (second link)
+			  :type 'notmuch-button-type
 			  'action `(lambda (arg)
 				     (notmuch-show ,(third link)))
 			  'follow-link t

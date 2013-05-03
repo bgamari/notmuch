@@ -150,6 +150,8 @@ chomp_newline (char *str)
  */
 extern int notmuch_format_version;
 
+typedef struct _notmuch_config notmuch_config_t;
+
 /* Commands that support structured output should support the
  * following argument
  *  { NOTMUCH_OPT_INT, &notmuch_format_version, "format-version", 0, 0 }
@@ -169,40 +171,34 @@ int
 notmuch_crypto_cleanup (notmuch_crypto_t *crypto);
 
 int
-notmuch_count_command (void *ctx, int argc, char *argv[]);
+notmuch_count_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_dump_command (void *ctx, int argc, char *argv[]);
+notmuch_dump_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_new_command (void *ctx, int argc, char *argv[]);
+notmuch_new_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_reply_command (void *ctx, int argc, char *argv[]);
+notmuch_reply_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_restore_command (void *ctx, int argc, char *argv[]);
+notmuch_restore_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_search_command (void *ctx, int argc, char *argv[]);
+notmuch_search_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_setup_command (void *ctx, int argc, char *argv[]);
+notmuch_setup_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_show_command (void *ctx, int argc, char *argv[]);
+notmuch_show_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_tag_command (void *ctx, int argc, char *argv[]);
+notmuch_tag_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_search_tags_command (void *ctx, int argc, char *argv[]);
-
-int
-notmuch_cat_command (void *ctx, int argc, char *argv[]);
-
-int
-notmuch_config_command (void *ctx, int argc, char *argv[]);
+notmuch_config_command (notmuch_config_t *config, int argc, char *argv[]);
 
 const char *
 notmuch_time_relative_date (const void *ctx, time_t then);
@@ -243,18 +239,19 @@ json_quote_str (const void *ctx, const char *str);
 
 /* notmuch-config.c */
 
-typedef struct _notmuch_config notmuch_config_t;
-
 notmuch_config_t *
 notmuch_config_open (void *ctx,
 		     const char *filename,
-		     notmuch_bool_t *is_new_ret);
+		     notmuch_bool_t create_new);
 
 void
 notmuch_config_close (notmuch_config_t *config);
 
 int
 notmuch_config_save (notmuch_config_t *config);
+
+notmuch_bool_t
+notmuch_config_is_new (notmuch_config_t *config);
 
 const char *
 notmuch_config_get_database_path (notmuch_config_t *config);
