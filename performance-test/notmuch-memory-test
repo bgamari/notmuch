@@ -16,6 +16,6 @@ fi
 
 cd $(dirname "$0")
 
-for test in T*.sh; do
+for test in M*.sh; do
     ./"$test" "$@"
 done

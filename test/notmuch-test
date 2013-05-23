@@ -20,6 +20,7 @@ TESTS="
   basic
   help-test
   config
+  setup
   new
   count
   search
@@ -64,6 +65,7 @@ TESTS="
   hex-escaping
   parse-time-string
   search-date
+  thread-replies
 "
 TESTS=${NOTMUCH_TESTS:=$TESTS}
 
