@@ -282,7 +282,7 @@ Does NOT change the database."
 (defun notmuch-pick-tag (&optional tag-changes)
   "Change tags for the current message"
   (interactive)
-  (setq tag-changes (funcall 'notmuch-tag (notmuch-pick-get-message-id) tag-changes))
+  (setq tag-changes (notmuch-tag (notmuch-pick-get-message-id) tag-changes))
   (notmuch-pick-tag-update-display tag-changes))
 
 (defun notmuch-pick-add-tag ()
@@ -376,15 +376,16 @@ Does NOT change the database."
 	    (split-window-vertically (/ (window-height) 4)))
       (with-selected-window notmuch-pick-message-window
 	;; Since we are only displaying one message do not indent.
-	(let ((notmuch-show-indent-messages-width 0))
-	  (setq current-prefix-arg '(4))
+	(let ((notmuch-show-indent-messages-width 0)
+	      (notmuch-show-only-matching-messages t))
 	  (setq buffer (notmuch-show id nil nil nil))))
       ;; We need the `let' as notmuch-pick-message-window is buffer local.
       (let ((window notmuch-pick-message-window))
 	(with-current-buffer buffer
 	  (setq notmuch-pick-message-window window)
 	  (add-hook 'kill-buffer-hook 'notmuch-pick-message-window-kill-hook)))
-      (notmuch-pick-tag-update-display (list "-unread"))
+      (when notmuch-show-mark-read-tags
+	(notmuch-pick-tag-update-display notmuch-show-mark-read-tags))
       (setq notmuch-pick-message-buffer buffer))))
 
 (defun notmuch-pick-show-message-out ()
@@ -773,8 +774,7 @@ Complete list of currently available key bindings:
         (save-excursion
           (goto-char (point-max))
           (insert string))
-	(notmuch-json-parse-partial-list 'notmuch-pick-insert-forest-thread
-					 'notmuch-pick-show-error
+	(notmuch-sexp-parse-partial-list 'notmuch-pick-insert-forest-thread
 					 results-buf)))))
 
 (defun notmuch-pick-worker (basic-query &optional query-context target buffer)
@@ -796,7 +796,7 @@ Complete list of currently available key bindings:
     (if notmuch-pick-asynchronous-parser
 	(let ((proc (start-process
 		     "notmuch-pick" buffer
-		     notmuch-command "show" "--body=false" "--format=json"
+		     notmuch-command "show" "--body=false" "--format=sexp"
 		     message-arg search-args))
 	      ;; Use a scratch buffer to accumulate partial output.
               ;; This buffer will be killed by the sentinel, which

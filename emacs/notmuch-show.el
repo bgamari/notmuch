@@ -39,6 +39,7 @@
 
 (declare-function notmuch-call-notmuch-process "notmuch" (&rest args))
 (declare-function notmuch-search-next-thread "notmuch" nil)
+(declare-function notmuch-search-previous-thread "notmuch" nil)
 (declare-function notmuch-search-show-thread "notmuch" nil)
 
 (defcustom notmuch-message-headers '("Subject" "To" "Cc" "Date")
@@ -465,21 +466,9 @@ message at DEPTH in the current thread."
 
 (define-button-type 'notmuch-show-part-button-type
   'action 'notmuch-show-part-button-default
-  'keymap 'notmuch-show-part-button-map
   'follow-link t
   'face 'message-mml
   :supertype 'notmuch-button-type)
-
-(defvar notmuch-show-part-button-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map button-map)
-    (define-key map "s" 'notmuch-show-part-button-save)
-    (define-key map "v" 'notmuch-show-part-button-view)
-    (define-key map "o" 'notmuch-show-part-button-interactively-view)
-    (define-key map "|" 'notmuch-show-part-button-pipe)
-    map)
-  "Submap for button commands")
-(fset 'notmuch-show-part-button-map notmuch-show-part-button-map)
 
 (defun notmuch-show-insert-part-header (nth content-type declared-type &optional name comment)
   (let ((button)
@@ -493,65 +482,10 @@ message at DEPTH in the current thread."
 	  (insert-button
 	   (concat "[ " base-label " ]")
 	   :base-label base-label
-	   :type 'notmuch-show-part-button-type
-	   :notmuch-part nth
-	   :notmuch-filename name
-	   :notmuch-content-type content-type))
+	   :type 'notmuch-show-part-button-type))
     (insert "\n")
     ;; return button
     button))
-
-;; Functions handling particular MIME parts.
-
-(defmacro notmuch-with-temp-part-buffer (message-id nth &rest body)
-  (declare (indent 2))
-  (let ((process-crypto (make-symbol "process-crypto")))
-    `(let ((,process-crypto notmuch-show-process-crypto))
-       (with-temp-buffer
-	 (setq notmuch-show-process-crypto ,process-crypto)
-	 ;; Always acquires the part via `notmuch part', even if it is
-	 ;; available in the JSON output.
-	 (insert (notmuch-get-bodypart-internal ,message-id ,nth notmuch-show-process-crypto))
-	 ,@body))))
-
-(defun notmuch-show-save-part (message-id nth &optional filename content-type)
-  (notmuch-with-temp-part-buffer message-id nth
-    (let ((file (read-file-name
-		 "Filename to save as: "
-		 (or mailcap-download-directory "~/")
-		 nil nil
-		 filename)))
-      ;; Don't re-compress .gz & al.  Arguably we should make
-      ;; `file-name-handler-alist' nil, but that would chop
-      ;; ange-ftp, which is reasonable to use here.
-      (mm-write-region (point-min) (point-max) file nil nil nil 'no-conversion t))))
-
-(defun notmuch-show-view-part (message-id nth &optional filename content-type )
-  (notmuch-with-temp-part-buffer message-id nth
-    ;; set mm-inlined-types to nil to force an external viewer
-    (let ((handle (mm-make-handle (current-buffer) (list content-type)))
-	  (mm-inlined-types nil))
-      ;; We override mm-save-part as notmuch-show-save-part is better
-      ;; since it offers the filename. We need to lexically bind
-      ;; everything we need for notmuch-show-save-part to prevent
-      ;; potential dynamic shadowing.
-      (lexical-let ((message-id message-id)
-		    (nth nth)
-		    (filename filename)
-		    (content-type content-type))
-	(flet ((mm-save-part (&rest args) (notmuch-show-save-part
-					   message-id nth filename content-type)))
-	  (mm-display-part handle))))))
-
-(defun notmuch-show-interactively-view-part (message-id nth &optional filename content-type)
-  (notmuch-with-temp-part-buffer message-id nth
-    (let ((handle (mm-make-handle (current-buffer) (list content-type))))
-      (mm-interactively-view-part handle))))
-
-(defun notmuch-show-pipe-part (message-id nth &optional filename content-type)
-  (notmuch-with-temp-part-buffer message-id nth
-    (let ((handle (mm-make-handle (current-buffer) (list content-type))))
-      (mm-pipe-part handle))))
 
 ;; This is taken from notmuch-wash: maybe it should be unified?
 (defun notmuch-show-toggle-part-invisibility (&optional button)
@@ -563,14 +497,18 @@ message at DEPTH in the current thread."
 	     (new-start (button-start button))
 	     (button-label (button-get button :base-label))
 	     (old-point (point))
+	     (properties (text-properties-at (point)))
 	     (inhibit-read-only t))
 	(overlay-put overlay 'invisible (not show))
 	(goto-char new-start)
 	(insert "[ " button-label (if show " ]" " (hidden) ]"))
+	(set-text-properties new-start (point) properties)
 	(let ((old-end (button-end button)))
 	  (move-overlay button new-start (point))
 	  (delete-region (point) old-end))
 	(goto-char (min old-point (1- (button-end button))))))))
+
+;; MIME part renderers
 
 (defun notmuch-show-multipart/*-to-list (part)
   (mapcar (lambda (inner-part) (plist-get inner-part :content-type))
@@ -902,7 +840,24 @@ If HIDE is non-nil then initially hide this part."
     ;; Ensure that the part ends with a carriage return.
     (unless (bolp)
       (insert "\n"))
-    (notmuch-show-create-part-overlays msg beg (point) hide)))
+    (notmuch-show-create-part-overlays msg beg (point) hide)
+    ;; Record part information.  Since we already inserted subparts,
+    ;; don't override existing :notmuch-part properties.
+    (notmuch-map-text-property beg (point) :notmuch-part
+			       (lambda (v) (or v part)))
+    ;; Make :notmuch-part front sticky and rear non-sticky so it stays
+    ;; applied to the beginning of each line when we indent the
+    ;; message.  Since we're operating on arbitrary renderer output,
+    ;; watch out for sticky specs of t, which means all properties are
+    ;; front-sticky/rear-nonsticky.
+    (notmuch-map-text-property beg (point) 'front-sticky
+			       (lambda (v) (if (listp v)
+					       (pushnew :notmuch-part v)
+					     v)))
+    (notmuch-map-text-property beg (point) 'rear-nonsticky
+			       (lambda (v) (if (listp v)
+					       (pushnew :notmuch-part v)
+					     v)))))
 
 (defun notmuch-show-insert-body (msg body depth)
   "Insert the body BODY at depth DEPTH in the current thread."
@@ -1242,6 +1197,16 @@ reset based on the original query."
   "Submap for stash commands")
 (fset 'notmuch-show-stash-map notmuch-show-stash-map)
 
+(defvar notmuch-show-part-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "s" 'notmuch-show-save-part)
+    (define-key map "v" 'notmuch-show-view-part)
+    (define-key map "o" 'notmuch-show-interactively-view-part)
+    (define-key map "|" 'notmuch-show-pipe-part)
+    map)
+  "Submap for part commands")
+(fset 'notmuch-show-part-map notmuch-show-part-map)
+
 (defvar notmuch-show-mode-map
       (let ((map (make-sparse-keymap)))
 	(define-key map "?" 'notmuch-help)
@@ -1273,6 +1238,8 @@ reset based on the original query."
 	(define-key map "P" 'notmuch-show-previous-message)
 	(define-key map "n" 'notmuch-show-next-open-message)
 	(define-key map "p" 'notmuch-show-previous-open-message)
+	(define-key map (kbd "M-n") 'notmuch-show-next-thread-show)
+	(define-key map (kbd "M-p") 'notmuch-show-previous-thread-show)
 	(define-key map (kbd "DEL") 'notmuch-show-rewind)
 	(define-key map " " 'notmuch-show-advance-and-archive)
 	(define-key map (kbd "M-RET") 'notmuch-show-open-or-close-all)
@@ -1282,6 +1249,7 @@ reset based on the original query."
 	(define-key map "$" 'notmuch-show-toggle-process-crypto)
 	(define-key map "<" 'notmuch-show-toggle-thread-indentation)
 	(define-key map "t" 'toggle-truncate-lines)
+	(define-key map "." 'notmuch-show-part-map)
 	map)
       "Keymap for \"notmuch show\" buffers.")
 (fset 'notmuch-show-mode-map notmuch-show-mode-map)
@@ -1403,6 +1371,14 @@ Some useful entries are:
   (save-excursion
     (notmuch-show-move-to-message-top)
     (get-text-property (point) :notmuch-message-properties)))
+
+(defun notmuch-show-get-part-properties ()
+  "Return the properties of the innermost part containing point.
+
+This is the part property list retrieved from the CLI.  Signals
+an error if there is no part containing point."
+  (or (get-text-property (point) :notmuch-part)
+      (error "No message part here")))
 
 (defun notmuch-show-set-prop (prop val &optional props)
   (let ((inhibit-read-only t)
@@ -1560,8 +1536,8 @@ This command is intended to be one of the simplest ways to
 process a thread of email. It works exactly like
 notmuch-show-advance, in that it scrolls through messages in a
 show buffer, except that when it gets to the end of the buffer it
-archives the entire current thread, (remove the \"inbox\" tag
-from each message), kills the buffer, and displays the next
+archives the entire current thread, (apply changes in
+`notmuch-archive-tags'), kills the buffer, and displays the next
 thread from the search from which this thread was originally
 shown."
   (interactive)
@@ -1757,7 +1733,7 @@ TAG-CHANGES is a list of tag operations for `notmuch-tag'."
   (let* ((current-tags (notmuch-show-get-tags))
 	 (new-tags (notmuch-update-tags current-tags tag-changes)))
     (unless (equal current-tags new-tags)
-      (funcall 'notmuch-tag (notmuch-show-get-message-id) tag-changes)
+      (notmuch-tag (notmuch-show-get-message-id) tag-changes)
       (notmuch-show-set-tags new-tags))))
 
 (defun notmuch-show-tag (&optional tag-changes)
@@ -1765,8 +1741,8 @@ TAG-CHANGES is a list of tag operations for `notmuch-tag'."
 
 See `notmuch-tag' for information on the format of TAG-CHANGES."
   (interactive)
-  (setq tag-changes (funcall 'notmuch-tag (notmuch-show-get-message-id) tag-changes))
-  (let* ((current-tags (notmuch-show-get-tags))
+  (let* ((tag-changes (notmuch-tag (notmuch-show-get-message-id) tag-changes))
+	 (current-tags (notmuch-show-get-tags))
 	 (new-tags (notmuch-update-tags current-tags tag-changes)))
     (unless (equal current-tags new-tags)
       (notmuch-show-set-tags new-tags))))
@@ -1776,7 +1752,7 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
 
 See `notmuch-tag' for information on the format of TAG-CHANGES."
   (interactive)
-  (setq tag-changes (funcall 'notmuch-tag (notmuch-show-get-messages-ids-search) tag-changes))
+  (setq tag-changes (notmuch-tag (notmuch-show-get-messages-ids-search) tag-changes))
   (notmuch-show-mapc
    (lambda ()
      (let* ((current-tags (notmuch-show-get-tags))
@@ -1834,25 +1810,41 @@ argument, hide all of the messages."
   (interactive)
   (backward-button 1))
 
-(defun notmuch-show-next-thread (&optional show-next)
-  "Move to the next item in the search results, if any."
+(defun notmuch-show-next-thread (&optional show previous)
+  "Move to the next item in the search results, if any.
+
+If SHOW is non-nil, open the next item in a show
+buffer. Otherwise just highlight the next item in the search
+buffer. If PREVIOUS is non-nil, move to the previous item in the
+search results instead."
   (interactive "P")
   (let ((parent-buffer notmuch-show-parent-buffer))
     (notmuch-kill-this-buffer)
     (when (buffer-live-p parent-buffer)
       (switch-to-buffer parent-buffer)
-      (notmuch-search-next-thread)
-      (if show-next
-	  (notmuch-search-show-thread)))))
+      (and (if previous
+	       (notmuch-search-previous-thread)
+	     (notmuch-search-next-thread))
+	   show
+	   (notmuch-search-show-thread)))))
+
+(defun notmuch-show-next-thread-show ()
+  "Show the next thread in the search results, if any."
+  (interactive)
+  (notmuch-show-next-thread t))
+
+(defun notmuch-show-previous-thread-show ()
+  "Show the previous thread in the search results, if any."
+  (interactive)
+  (notmuch-show-next-thread t t))
 
 (defun notmuch-show-archive-thread (&optional unarchive)
   "Archive each message in thread.
 
 Archive each message currently shown by applying the tag changes
-in `notmuch-archive-tags' to each (remove the \"inbox\" tag by
-default). If a prefix argument is given, the messages will be
-\"unarchived\", i.e. the tag changes in `notmuch-archive-tags'
-will be reversed.
+in `notmuch-archive-tags' to each. If a prefix argument is given,
+the messages will be \"unarchived\", i.e. the tag changes in
+`notmuch-archive-tags' will be reversed.
 
 Note: This command is safe from any race condition of new messages
 being delivered to the same thread. It does not archive the
@@ -1879,10 +1871,9 @@ buffer."
   "Archive the current message.
 
 Archive the current message by applying the tag changes in
-`notmuch-archive-tags' to it (remove the \"inbox\" tag by
-default). If a prefix argument is given, the message will be
-\"unarchived\", i.e. the tag changes in `notmuch-archive-tags'
-will be reversed."
+`notmuch-archive-tags' to it. If a prefix argument is given, the
+message will be \"unarchived\", i.e. the tag changes in
+`notmuch-archive-tags' will be reversed."
   (interactive "P")
   (when notmuch-archive-tags
     (apply 'notmuch-show-tag-message
@@ -1988,40 +1979,71 @@ the user (see `notmuch-show-stash-mlarchive-link-alist')."
   (notmuch-show-stash-mlarchive-link mla)
   (browse-url (current-kill 0 t)))
 
-;; Commands typically bound to buttons.
+;; Interactive part functions and their helpers
+
+(defun notmuch-show-generate-part-buffer (message-id nth)
+  "Return a temporary buffer containing the specified part's content."
+  (let ((buf (generate-new-buffer " *notmuch-part*"))
+	(process-crypto notmuch-show-process-crypto))
+    (with-current-buffer buf
+      (setq notmuch-show-process-crypto process-crypto)
+      ;; Always acquires the part via `notmuch part', even if it is
+      ;; available in the JSON output.
+      (insert (notmuch-get-bodypart-internal message-id nth notmuch-show-process-crypto)))
+    buf))
+
+(defun notmuch-show-current-part-handle ()
+  "Return an mm-handle for the part containing point.
+
+This creates a temporary buffer for the part's content; the
+caller is responsible for killing this buffer as appropriate."
+  (let* ((part (notmuch-show-get-part-properties))
+	 (message-id (notmuch-show-get-message-id))
+	 (nth (plist-get part :id))
+	 (buf (notmuch-show-generate-part-buffer message-id nth))
+	 (content-type (plist-get part :content-type))
+	 (filename (plist-get part :filename))
+	 (disposition (if filename `(attachment (filename . ,filename)))))
+    (mm-make-handle buf (list content-type) nil nil disposition)))
+
+(defun notmuch-show-apply-to-current-part-handle (fn)
+  "Apply FN to an mm-handle for the part containing point.
+
+This ensures that the temporary buffer created for the mm-handle
+is destroyed when FN returns."
+  (let ((handle (notmuch-show-current-part-handle)))
+    (unwind-protect
+	(funcall fn handle)
+      (kill-buffer (mm-handle-buffer handle)))))
 
 (defun notmuch-show-part-button-default (&optional button)
   (interactive)
   (let ((button (or button (button-at (point)))))
     (if (button-get button 'overlay)
 	(notmuch-show-toggle-part-invisibility button)
-      (notmuch-show-part-button-internal button notmuch-show-part-button-default-action))))
+      (call-interactively notmuch-show-part-button-default-action))))
 
-(defun notmuch-show-part-button-save (&optional button)
+(defun notmuch-show-save-part ()
+  "Save the MIME part containing point to a file."
   (interactive)
-  (notmuch-show-part-button-internal button #'notmuch-show-save-part))
+  (notmuch-show-apply-to-current-part-handle #'mm-save-part))
 
-(defun notmuch-show-part-button-view (&optional button)
+(defun notmuch-show-view-part ()
+  "View the MIME part containing point in an external viewer."
   (interactive)
-  (notmuch-show-part-button-internal button #'notmuch-show-view-part))
+  ;; Set mm-inlined-types to nil to force an external viewer
+  (let ((mm-inlined-types nil))
+    (notmuch-show-apply-to-current-part-handle #'mm-display-part)))
 
-(defun notmuch-show-part-button-interactively-view (&optional button)
+(defun notmuch-show-interactively-view-part ()
+  "View the MIME part containing point, prompting for a viewer."
   (interactive)
-  (notmuch-show-part-button-internal button #'notmuch-show-interactively-view-part))
+  (notmuch-show-apply-to-current-part-handle #'mm-interactively-view-part))
 
-(defun notmuch-show-part-button-pipe (&optional button)
+(defun notmuch-show-pipe-part ()
+  "Pipe the MIME part containing point to an external command."
   (interactive)
-  (notmuch-show-part-button-internal button #'notmuch-show-pipe-part))
+  (notmuch-show-apply-to-current-part-handle #'mm-pipe-part))
 
-(defun notmuch-show-part-button-internal (button handler)
-  (let ((button (or button (button-at (point)))))
-    (if button
-	(let ((nth (button-get button :notmuch-part)))
-	  (if nth
-	      (funcall handler (notmuch-show-get-message-id) nth
-		       (button-get button :notmuch-filename)
-		       (button-get button :notmuch-content-type)))))))
-
-;;
 
 (provide 'notmuch-show)

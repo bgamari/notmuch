@@ -58,6 +58,7 @@
 (require 'notmuch-hello)
 (require 'notmuch-maildir-fcc)
 (require 'notmuch-message)
+(require 'notmuch-parser)
 
 (defcustom notmuch-search-result-format
   `(("date" . "%12s ")
@@ -385,17 +386,22 @@ number of matched messages and total messages in the thread,
 participants in the thread, a representative subject line, and
 any tags).
 
-Pressing \\[notmuch-search-show-thread] on any line displays that thread. The '\\[notmuch-search-add-tag]' and '\\[notmuch-search-remove-tag]'
-keys can be used to add or remove tags from a thread. The '\\[notmuch-search-archive-thread]' key
-is a convenience for archiving a thread (removing the \"inbox\"
-tag). The '\\[notmuch-search-tag-all]' key can be used to add and/or remove tags from all
-messages (as opposed to threads) that match the current query.  Use with caution, as this
-will also tag matching messages that arrived *after* constructing the buffer.
+Pressing \\[notmuch-search-show-thread] on any line displays that
+thread. The '\\[notmuch-search-add-tag]' and
+'\\[notmuch-search-remove-tag]' keys can be used to add or remove
+tags from a thread. The '\\[notmuch-search-archive-thread]' key
+is a convenience for archiving a thread (applying changes in
+`notmuch-archive-tags'). The '\\[notmuch-search-tag-all]' key can
+be used to add and/or remove tags from all messages (as opposed
+to threads) that match the current query.  Use with caution, as
+this will also tag matching messages that arrived *after*
+constructing the buffer.
 
-Other useful commands are '\\[notmuch-search-filter]' for filtering the current search
-based on an additional query string, '\\[notmuch-search-filter-by-tag]' for filtering to include
-only messages with a given tag, and '\\[notmuch-search]' to execute a new, global
-search.
+Other useful commands are '\\[notmuch-search-filter]' for
+filtering the current search based on an additional query string,
+'\\[notmuch-search-filter-by-tag]' for filtering to include only
+messages with a given tag, and '\\[notmuch-search]' to execute a
+new, global search.
 
 Complete list of currently available key bindings:
 
@@ -561,7 +567,7 @@ will be signaled."
 (defun notmuch-search-tag-region (beg end &optional tag-changes)
   "Change tags for threads in the given region."
   (let ((search-string (notmuch-search-find-thread-id-region-search beg end)))
-    (setq tag-changes (funcall 'notmuch-tag search-string tag-changes))
+    (setq tag-changes (notmuch-tag search-string tag-changes))
     (notmuch-search-foreach-result beg end
       (lambda (pos)
 	(notmuch-search-set-tags
@@ -575,7 +581,7 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
   (interactive)
   (let* ((beg (if (region-active-p) (region-beginning) (point)))
 	 (end (if (region-active-p) (region-end) (point))))
-    (funcall 'notmuch-search-tag-region beg end tag-changes)))
+    (notmuch-search-tag-region beg end tag-changes)))
 
 (defun notmuch-search-add-tag ()
   "Same as `notmuch-search-tag' but sets initial input to '+'."
@@ -653,15 +659,8 @@ of the result."
 		    ;; For version mismatch, there's no point in
 		    ;; showing the search buffer
 		    (when (or (= exit-status 20) (= exit-status 21))
-		      (kill-buffer))
-		    (condition-case err
-			(notmuch-check-async-exit-status proc msg)
-		      ;; Suppress the error signal since strange
-		      ;; things happen if a sentinel signals.  Mimic
-		      ;; the top-level's handling of error messages.
-		      (error
-		       (message "%s" (error-message-string err))
-		       (throw 'return nil)))
+		      (kill-buffer)
+		      (throw 'return nil))
 		    (if (and atbob
 			     (not (string= notmuch-search-target-thread "found")))
 			(set 'never-found-target-thread t)))))
@@ -816,13 +815,6 @@ non-authors is found, assume that all of the authors match."
 	(setq notmuch-search-target-thread "found")
 	(goto-char beg)))))
 
-(defun notmuch-search-show-error (string &rest objects)
-  (save-excursion
-    (goto-char (point-max))
-    (insert "Error: Unexpected output from notmuch search:\n")
-    (insert (apply #'format string objects))
-    (insert "\n")))
-
 (defun notmuch-search-process-filter (proc string)
   "Process and filter the output of \"notmuch search\""
   (let ((results-buf (process-buffer proc))
@@ -836,8 +828,7 @@ non-authors is found, assume that all of the authors match."
 	(save-excursion
 	  (goto-char (point-max))
 	  (insert string))
-	(notmuch-json-parse-partial-list 'notmuch-search-show-result
-					 'notmuch-search-show-error
+	(notmuch-sexp-parse-partial-list 'notmuch-search-show-result
 					 results-buf)))))
 
 (defun notmuch-search-tag-all (&optional tag-changes)
@@ -918,9 +909,8 @@ Other optional parameters are used as follows:
   target-line: The line number to move to if the target thread does not
                appear in the search results."
   (interactive)
-  (if (null query)
-      (setq query (notmuch-read-query "Notmuch search: ")))
-  (let ((buffer (get-buffer-create (notmuch-search-buffer-title query))))
+  (let* ((query (or query (notmuch-read-query "Notmuch search: ")))
+	 (buffer (get-buffer-create (notmuch-search-buffer-title query))))
     (switch-to-buffer buffer)
     (notmuch-search-mode)
     ;; Don't track undo information for this buffer
@@ -938,10 +928,9 @@ Other optional parameters are used as follows:
       (erase-buffer)
       (goto-char (point-min))
       (save-excursion
-	(let ((proc (start-process
-		     "notmuch-search" buffer
-		     notmuch-command "search"
-		     "--format=json" "--format-version=1"
+	(let ((proc (notmuch-start-notmuch
+		     "notmuch-search" buffer #'notmuch-search-process-sentinel
+		     "search" "--format=sexp" "--format-version=1"
 		     (if oldest-first
 			 "--sort=oldest-first"
 		       "--sort=newest-first")
@@ -951,7 +940,6 @@ Other optional parameters are used as follows:
 	      ;; should be called no matter how the process dies.
 	      (parse-buf (generate-new-buffer " *notmuch search parse*")))
 	  (process-put proc 'parse-buf parse-buf)
-	  (set-process-sentinel proc 'notmuch-search-process-sentinel)
 	  (set-process-filter proc 'notmuch-search-process-filter)
 	  (set-process-query-on-exit-flag proc nil))))
     (run-hooks 'notmuch-search-hook)))
