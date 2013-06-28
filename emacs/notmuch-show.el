@@ -213,6 +213,9 @@ For example, if you wanted to remove an \"unread\" tag and add a
   "Enable Visual Line mode."
   (visual-line-mode t))
 
+;; DEPRECATED in Notmuch 0.16 since we now have convenient part
+;; commands.  We'll keep the command around for a version or two in
+;; case people want to bind it themselves.
 (defun notmuch-show-view-all-mime-parts ()
   "Use external viewers to view all attachments from the current message."
   (interactive)
@@ -482,31 +485,44 @@ message at DEPTH in the current thread."
 	  (insert-button
 	   (concat "[ " base-label " ]")
 	   :base-label base-label
-	   :type 'notmuch-show-part-button-type))
+	   :type 'notmuch-show-part-button-type
+	   :notmuch-part-hidden nil))
     (insert "\n")
     ;; return button
     button))
 
-;; This is taken from notmuch-wash: maybe it should be unified?
 (defun notmuch-show-toggle-part-invisibility (&optional button)
   (interactive)
   (let* ((button (or button (button-at (point))))
-	 (overlay (button-get button 'overlay)))
-    (when overlay
-      (let* ((show (overlay-get overlay 'invisible))
+	 (overlay (button-get button 'overlay))
+	 (lazy-part (button-get button :notmuch-lazy-part)))
+    ;; We have a part to toggle if there is an overlay or if there is a lazy part.
+    ;; If neither is present we cannot toggle the part so we just return nil.
+    (when (or overlay lazy-part)
+      (let* ((show (button-get button :notmuch-part-hidden))
 	     (new-start (button-start button))
 	     (button-label (button-get button :base-label))
 	     (old-point (point))
 	     (properties (text-properties-at (point)))
 	     (inhibit-read-only t))
-	(overlay-put overlay 'invisible (not show))
+	;; Toggle the button itself.
+	(button-put button :notmuch-part-hidden (not show))
 	(goto-char new-start)
 	(insert "[ " button-label (if show " ]" " (hidden) ]"))
 	(set-text-properties new-start (point) properties)
 	(let ((old-end (button-end button)))
 	  (move-overlay button new-start (point))
 	  (delete-region (point) old-end))
-	(goto-char (min old-point (1- (button-end button))))))))
+	(goto-char (min old-point (1- (button-end button))))
+	;; Return nil if there is a lazy-part, it is empty, and we are
+	;; trying to show it.  In all other cases return t.
+	(if lazy-part
+	    (when show
+	      (button-put button :notmuch-lazy-part nil)
+	      (notmuch-show-lazy-part lazy-part button))
+	  ;; else there must be an overlay.
+	  (overlay-put overlay 'invisible (not show))
+	  t)))))
 
 ;; MIME part renderers
 
@@ -514,8 +530,7 @@ message at DEPTH in the current thread."
   (mapcar (lambda (inner-part) (plist-get inner-part :content-type))
 	  (plist-get part :content)))
 
-(defun notmuch-show-insert-part-multipart/alternative (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-header nth declared-type content-type nil)
+(defun notmuch-show-insert-part-multipart/alternative (msg part content-type nth depth button)
   (let ((chosen-type (car (notmuch-multipart/alternative-choose (notmuch-show-multipart/*-to-list part))))
 	(inner-parts (plist-get part :content))
 	(start (point)))
@@ -592,8 +607,7 @@ message at DEPTH in the current thread."
 	  content-type)
       nil)))
 
-(defun notmuch-show-insert-part-multipart/related (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-header nth declared-type content-type nil)
+(defun notmuch-show-insert-part-multipart/related (msg part content-type nth depth button)
   (let ((inner-parts (plist-get part :content))
 	(start (point)))
 
@@ -612,16 +626,15 @@ message at DEPTH in the current thread."
       (indent-rigidly start (point) 1)))
   t)
 
-(defun notmuch-show-insert-part-multipart/signed (msg part content-type nth depth declared-type)
-  (let ((button (notmuch-show-insert-part-header nth declared-type content-type nil)))
-    (button-put button 'face 'notmuch-crypto-part-header)
-    ;; add signature status button if sigstatus provided
-    (if (plist-member part :sigstatus)
-	(let* ((from (notmuch-show-get-header :From msg))
-	       (sigstatus (car (plist-get part :sigstatus))))
-	  (notmuch-crypto-insert-sigstatus-button sigstatus from))
-      ;; if we're not adding sigstatus, tell the user how they can get it
-      (button-put button 'help-echo "Set notmuch-crypto-process-mime to process cryptographic MIME parts.")))
+(defun notmuch-show-insert-part-multipart/signed (msg part content-type nth depth button)
+  (button-put button 'face 'notmuch-crypto-part-header)
+  ;; add signature status button if sigstatus provided
+  (if (plist-member part :sigstatus)
+      (let* ((from (notmuch-show-get-header :From msg))
+	     (sigstatus (car (plist-get part :sigstatus))))
+	(notmuch-crypto-insert-sigstatus-button sigstatus from))
+    ;; if we're not adding sigstatus, tell the user how they can get it
+    (button-put button 'help-echo "Set notmuch-crypto-process-mime to process cryptographic MIME parts."))
 
   (let ((inner-parts (plist-get part :content))
 	(start (point)))
@@ -634,20 +647,19 @@ message at DEPTH in the current thread."
       (indent-rigidly start (point) 1)))
   t)
 
-(defun notmuch-show-insert-part-multipart/encrypted (msg part content-type nth depth declared-type)
-  (let ((button (notmuch-show-insert-part-header nth declared-type content-type nil)))
-    (button-put button 'face 'notmuch-crypto-part-header)
-    ;; add encryption status button if encstatus specified
-    (if (plist-member part :encstatus)
-	(let ((encstatus (car (plist-get part :encstatus))))
-	  (notmuch-crypto-insert-encstatus-button encstatus)
-	  ;; add signature status button if sigstatus specified
-	  (if (plist-member part :sigstatus)
-	      (let* ((from (notmuch-show-get-header :From msg))
-		     (sigstatus (car (plist-get part :sigstatus))))
-		(notmuch-crypto-insert-sigstatus-button sigstatus from))))
-      ;; if we're not adding encstatus, tell the user how they can get it
-      (button-put button 'help-echo "Set notmuch-crypto-process-mime to process cryptographic MIME parts.")))
+(defun notmuch-show-insert-part-multipart/encrypted (msg part content-type nth depth button)
+  (button-put button 'face 'notmuch-crypto-part-header)
+  ;; add encryption status button if encstatus specified
+  (if (plist-member part :encstatus)
+      (let ((encstatus (car (plist-get part :encstatus))))
+	(notmuch-crypto-insert-encstatus-button encstatus)
+	;; add signature status button if sigstatus specified
+	(if (plist-member part :sigstatus)
+	    (let* ((from (notmuch-show-get-header :From msg))
+		   (sigstatus (car (plist-get part :sigstatus))))
+	      (notmuch-crypto-insert-sigstatus-button sigstatus from))))
+    ;; if we're not adding encstatus, tell the user how they can get it
+    (button-put button 'help-echo "Set notmuch-crypto-process-mime to process cryptographic MIME parts."))
 
   (let ((inner-parts (plist-get part :content))
 	(start (point)))
@@ -660,8 +672,7 @@ message at DEPTH in the current thread."
       (indent-rigidly start (point) 1)))
   t)
 
-(defun notmuch-show-insert-part-multipart/* (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-header nth declared-type content-type nil)
+(defun notmuch-show-insert-part-multipart/* (msg part content-type nth depth button)
   (let ((inner-parts (plist-get part :content))
 	(start (point)))
     ;; Show all of the parts.
@@ -673,8 +684,7 @@ message at DEPTH in the current thread."
       (indent-rigidly start (point) 1)))
   t)
 
-(defun notmuch-show-insert-part-message/rfc822 (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-header nth declared-type content-type nil)
+(defun notmuch-show-insert-part-message/rfc822 (msg part content-type nth depth button)
   (let* ((message (car (plist-get part :content)))
 	 (body (car (plist-get message :body)))
 	 (start (point)))
@@ -695,12 +705,13 @@ message at DEPTH in the current thread."
       (indent-rigidly start (point) 1)))
   t)
 
-(defun notmuch-show-insert-part-text/plain (msg part content-type nth depth declared-type)
-  (let ((start (point)))
-    ;; If this text/plain part is not the first part in the message,
-    ;; insert a header to make this clear.
-    (if (> nth 1)
-	(notmuch-show-insert-part-header nth declared-type content-type (plist-get part :filename)))
+(defun notmuch-show-insert-part-text/plain (msg part content-type nth depth button)
+  ;; For backward compatibility we want to apply the text/plain hook
+  ;; to the whole of the part including the part button if there is
+  ;; one.
+  (let ((start (if button
+		   (button-start button)
+		 (point))))
     (insert (notmuch-get-bodypart-content msg part nth notmuch-show-process-crypto))
     (save-excursion
       (save-restriction
@@ -708,8 +719,7 @@ message at DEPTH in the current thread."
 	(run-hook-with-args 'notmuch-show-insert-text/plain-hook msg depth))))
   t)
 
-(defun notmuch-show-insert-part-text/calendar (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-header nth declared-type content-type (plist-get part :filename))
+(defun notmuch-show-insert-part-text/calendar (msg part content-type nth depth button)
   (insert (with-temp-buffer
 	    (insert (notmuch-get-bodypart-content msg part nth notmuch-show-process-crypto))
 	    ;; notmuch-get-bodypart-content provides "raw", non-converted
@@ -732,8 +742,8 @@ message at DEPTH in the current thread."
   t)
 
 ;; For backwards compatibility.
-(defun notmuch-show-insert-part-text/x-vcalendar (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-text/calendar msg part content-type nth depth declared-type))
+(defun notmuch-show-insert-part-text/x-vcalendar (msg part content-type nth depth button)
+  (notmuch-show-insert-part-text/calendar msg part content-type nth depth button))
 
 (defun notmuch-show-get-mime-type-of-application/octet-stream (part)
   ;; If we can deduce a MIME type from the filename of the attachment,
@@ -751,11 +761,7 @@ message at DEPTH in the current thread."
 		nil))
 	  nil))))
 
-;; Handler for wash generated inline patch fake parts.
-(defun notmuch-show-insert-part-inline-patch-fake-part (msg part content-type nth depth declared-type)
-  (notmuch-show-insert-part-*/* msg part content-type nth depth declared-type))
-
-(defun notmuch-show-insert-part-text/html (msg part content-type nth depth declared-type)
+(defun notmuch-show-insert-part-text/html (msg part content-type nth depth button)
   ;; text/html handler to work around bugs in renderers and our
   ;; invisibile parts code. In particular w3m sets up a keymap which
   ;; "leaks" outside the invisible region and causes strange effects
@@ -763,11 +769,10 @@ message at DEPTH in the current thread."
   ;; tell w3m not to set a keymap (so the normal notmuch-show-mode-map
   ;; remains).
   (let ((mm-inline-text-html-with-w3m-keymap nil))
-    (notmuch-show-insert-part-*/* msg part content-type nth depth declared-type)))
+    (notmuch-show-insert-part-*/* msg part content-type nth depth button)))
 
-(defun notmuch-show-insert-part-*/* (msg part content-type nth depth declared-type)
+(defun notmuch-show-insert-part-*/* (msg part content-type nth depth button)
   ;; This handler _must_ succeed - it is the handler of last resort.
-  (notmuch-show-insert-part-header nth content-type declared-type (plist-get part :filename))
   (notmuch-mm-display-part-inline msg part nth content-type notmuch-show-process-crypto)
   t)
 
@@ -790,13 +795,13 @@ message at DEPTH in the current thread."
 
 ;; 
 
-(defun notmuch-show-insert-bodypart-internal (msg part content-type nth depth declared-type)
+(defun notmuch-show-insert-bodypart-internal (msg part content-type nth depth button)
   (let ((handlers (notmuch-show-handlers-for content-type)))
     ;; Run the content handlers until one of them returns a non-nil
     ;; value.
     (while (and handlers
 		(not (condition-case err
-			 (funcall (car handlers) msg part content-type nth depth declared-type)
+			 (funcall (car handlers) msg part content-type nth depth button)
 		       (error (progn
 				(insert "!!! Bodypart insert error: ")
 				(insert (error-message-string err))
@@ -804,26 +809,76 @@ message at DEPTH in the current thread."
       (setq handlers (cdr handlers))))
   t)
 
-(defun notmuch-show-create-part-overlays (msg beg end hide)
+(defun notmuch-show-create-part-overlays (button beg end)
   "Add an overlay to the part between BEG and END"
-  (let* ((button (button-at beg))
-	 (part-beg (and button (1+ (button-end button)))))
 
-    ;; If the part contains no text we do not make it toggleable. We
-    ;; also need to check that the button is a genuine part button not
-    ;; a notmuch-wash button.
-    (when (and button (/= part-beg end) (button-get button :base-label))
-      (button-put button 'overlay (make-overlay part-beg end))
-      ;; We toggle the button for hidden parts as that gets the
-      ;; button label right.
-      (save-excursion
-	(when hide
-	  (notmuch-show-toggle-part-invisibility button))))))
+  ;; If there is no button (i.e., the part is text/plain and the first
+  ;; part) or if the part has no content then we don't make the part
+  ;; toggleable.
+  (when (and button (/= beg end))
+    (button-put button 'overlay (make-overlay beg end))
+    ;; Return true if we created an overlay.
+    t))
+
+(defun notmuch-show-record-part-information (part beg end)
+  "Store PART as a text property from BEG to END"
+
+  ;; Record part information.  Since we already inserted subparts,
+  ;; don't override existing :notmuch-part properties.
+  (notmuch-map-text-property beg end :notmuch-part
+			     (lambda (v) (or v part)))
+  ;; Make :notmuch-part front sticky and rear non-sticky so it stays
+  ;; applied to the beginning of each line when we indent the
+  ;; message.  Since we're operating on arbitrary renderer output,
+  ;; watch out for sticky specs of t, which means all properties are
+  ;; front-sticky/rear-nonsticky.
+  (notmuch-map-text-property beg end 'front-sticky
+			     (lambda (v) (if (listp v)
+					     (pushnew :notmuch-part v)
+					   v)))
+  (notmuch-map-text-property beg end 'rear-nonsticky
+			     (lambda (v) (if (listp v)
+					     (pushnew :notmuch-part v)
+					   v))))
+
+(defun notmuch-show-lazy-part (part-args button)
+  ;; Insert the lazy part after the button for the part. We would just
+  ;; move to the start of the new line following the button and insert
+  ;; the part but that point might have text properties (eg colours
+  ;; from a message header etc) so instead we start from the last
+  ;; character of the button by adding a newline and finish by
+  ;; removing the extra newline from the end of the part.
+  (save-excursion
+    (goto-char (button-end button))
+    (insert "\n")
+    (let* ((inhibit-read-only t)
+	   ;; We need to use markers for the start and end of the part
+	   ;; because the part insertion functions do not guarantee
+	   ;; to leave point at the end of the part.
+	   (part-beg (copy-marker (point) nil))
+	   (part-end (copy-marker (point) t))
+	   ;; We have to save the depth as we can't find the depth
+	   ;; when narrowed.
+	   (depth (notmuch-show-get-depth)))
+      (save-restriction
+	(narrow-to-region part-beg part-end)
+	(delete-region part-beg part-end)
+	(apply #'notmuch-show-insert-bodypart-internal part-args)
+	(indent-rigidly part-beg part-end depth))
+      (goto-char part-end)
+      (delete-char 1)
+      (notmuch-show-record-part-information (second part-args)
+					    (button-start button)
+					    part-end)
+      ;; Create the overlay. If the lazy-part turned out to be empty/not
+      ;; showable this returns nil.
+      (notmuch-show-create-part-overlays button part-beg part-end))))
 
 (defun notmuch-show-insert-bodypart (msg part depth &optional hide)
   "Insert the body part PART at depth DEPTH in the current thread.
 
 If HIDE is non-nil then initially hide this part."
+
   (let* ((content-type (downcase (plist-get part :content-type)))
 	 (mime-type (or (and (string= content-type "application/octet-stream")
 			     (notmuch-show-get-mime-type-of-application/octet-stream part))
@@ -831,33 +886,30 @@ If HIDE is non-nil then initially hide this part."
 			     "text/x-diff")
 			content-type))
 	 (nth (plist-get part :id))
-	 (beg (point)))
+	 (beg (point))
+	 ;; We omit the part button for the first (or only) part if this is text/plain.
+	 (button (unless (and (string= mime-type "text/plain") (<= nth 1))
+		   (notmuch-show-insert-part-header nth mime-type content-type (plist-get part :filename))))
+	 (content-beg (point)))
 
-    (notmuch-show-insert-bodypart-internal msg part mime-type nth depth content-type)
+    (if (not hide)
+        (notmuch-show-insert-bodypart-internal msg part mime-type nth depth button)
+      (button-put button :notmuch-lazy-part
+                  (list msg part mime-type nth depth button)))
+
     ;; Some of the body part handlers leave point somewhere up in the
     ;; part, so we make sure that we're down at the end.
     (goto-char (point-max))
     ;; Ensure that the part ends with a carriage return.
     (unless (bolp)
       (insert "\n"))
-    (notmuch-show-create-part-overlays msg beg (point) hide)
-    ;; Record part information.  Since we already inserted subparts,
-    ;; don't override existing :notmuch-part properties.
-    (notmuch-map-text-property beg (point) :notmuch-part
-			       (lambda (v) (or v part)))
-    ;; Make :notmuch-part front sticky and rear non-sticky so it stays
-    ;; applied to the beginning of each line when we indent the
-    ;; message.  Since we're operating on arbitrary renderer output,
-    ;; watch out for sticky specs of t, which means all properties are
-    ;; front-sticky/rear-nonsticky.
-    (notmuch-map-text-property beg (point) 'front-sticky
-			       (lambda (v) (if (listp v)
-					       (pushnew :notmuch-part v)
-					     v)))
-    (notmuch-map-text-property beg (point) 'rear-nonsticky
-			       (lambda (v) (if (listp v)
-					       (pushnew :notmuch-part v)
-					     v)))))
+    ;; We do not create the overlay for hidden (lazy) parts until
+    ;; they are inserted.
+    (if (not hide)
+	(notmuch-show-create-part-overlays button content-beg (point))
+      (save-excursion
+	(notmuch-show-toggle-part-invisibility button)))
+    (notmuch-show-record-part-information part beg (point))))
 
 (defun notmuch-show-insert-body (msg body depth)
   "Insert the body BODY at depth DEPTH in the current thread."
@@ -1223,7 +1275,6 @@ reset based on the original query."
 	(define-key map "|" 'notmuch-show-pipe-message)
 	(define-key map "w" 'notmuch-show-save-attachments)
 	(define-key map "V" 'notmuch-show-view-raw-message)
-	(define-key map "v" 'notmuch-show-view-all-mime-parts)
 	(define-key map "c" 'notmuch-show-stash-map)
 	(define-key map "=" 'notmuch-show-refresh-view)
 	(define-key map "h" 'notmuch-show-toggle-visibility-headers)
@@ -1702,7 +1753,10 @@ to stdout or stderr will appear in the *notmuch-pipe* buffer.
 When invoked with a prefix argument, the command will receive all
 open messages in the current thread (formatted as an mbox) rather
 than only the current message."
-  (interactive "P\nsPipe message to command: ")
+  (interactive (let ((query-string (if current-prefix-arg
+				       "Pipe all open messages to command: "
+				     "Pipe message to command: ")))
+		 (list current-prefix-arg (read-string query-string))))
   (let (shell-command)
     (if entire-thread
 	(setq shell-command
@@ -2019,8 +2073,10 @@ is destroyed when FN returns."
 (defun notmuch-show-part-button-default (&optional button)
   (interactive)
   (let ((button (or button (button-at (point)))))
-    (if (button-get button 'overlay)
-	(notmuch-show-toggle-part-invisibility button)
+    ;; Try to toggle the part, if that fails then call the default
+    ;; action. The toggle fails if the part has no emacs renderable
+    ;; content.
+    (unless (notmuch-show-toggle-part-invisibility button)
       (call-interactively notmuch-show-part-button-default-action))))
 
 (defun notmuch-show-save-part ()

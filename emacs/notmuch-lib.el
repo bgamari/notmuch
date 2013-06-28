@@ -68,7 +68,12 @@
   :group 'notmuch)
 
 (defcustom notmuch-search-oldest-first t
-  "Show the oldest mail first when searching."
+  "Show the oldest mail first when searching.
+
+This variable defines the default sort order for displaying
+search results. Note that any filtered searches created by
+`notmuch-search-filter' retain the search order of the parent
+search."
   :type 'boolean
   :group 'notmuch-search)
 
@@ -462,13 +467,11 @@ You may need to restart Emacs or upgrade your notmuch package."))
 	;; `notmuch-logged-error' does not return.
 	))))
 
-(defun notmuch-call-notmuch-json (&rest args)
-  "Invoke `notmuch-command' with ARGS and return the parsed JSON output.
+(defun notmuch-call-notmuch-sexp (&rest args)
+  "Invoke `notmuch-command' with ARGS and return the parsed S-exp output.
 
-The returned output will represent objects using property lists
-and arrays as lists.  If notmuch exits with a non-zero status,
-this will pop up a buffer containing notmuch's output and signal
-an error."
+If notmuch exits with a non-zero status, this will pop up a
+buffer containing notmuch's output and signal an error."
 
   (with-temp-buffer
     (let ((err-file (make-temp-file "nmerr")))
@@ -478,10 +481,7 @@ an error."
 	    (notmuch-check-exit-status status (cons notmuch-command args)
 				       (buffer-string) err-file)
 	    (goto-char (point-min))
-	    (let ((json-object-type 'plist)
-		  (json-array-type 'list)
-		  (json-false 'nil))
-	      (json-read)))
+	    (read (current-buffer)))
 	(delete-file err-file)))))
 
 (defun notmuch-start-notmuch (name buffer sentinel &rest args)
@@ -528,8 +528,12 @@ status."
 	  (when sub-sentinel
 	    (funcall sub-sentinel proc event))
 	  ;; Check the exit status.  This will signal an error if the
-	  ;; exit status is non-zero.
-	  (notmuch-check-async-exit-status proc event real-command err-file)
+	  ;; exit status is non-zero.  Don't do this if the process
+	  ;; buffer is dead since that means Emacs killed the process
+	  ;; and there's no point in telling the user that (but we
+	  ;; still check for and report stderr output below).
+	  (when (buffer-live-p (process-buffer proc))
+	    (notmuch-check-async-exit-status proc event real-command err-file))
 	  ;; If that didn't signal an error, then any error output was
 	  ;; really warning output.  Show warnings, if any.
 	  (let ((warnings
