@@ -146,32 +146,46 @@
   :group 'notmuch-pick
   :group 'notmuch-faces)
 
-(defvar notmuch-pick-previous-subject "")
+(defvar notmuch-pick-previous-subject
+  "The subject of the most recent result shown during the async display")
 (make-variable-buffer-local 'notmuch-pick-previous-subject)
 
-;; The basic query i.e. the key part of the search request.
-(defvar notmuch-pick-basic-query nil)
+(defvar notmuch-pick-basic-query nil
+  "A buffer local copy of argument query to the function notmuch-pick")
 (make-variable-buffer-local 'notmuch-pick-basic-query)
-;; The context of the search: i.e., useful but can be dropped.
-(defvar notmuch-pick-query-context nil)
+
+(defvar notmuch-pick-query-context nil
+  "A buffer local copy of argument query-context to the function notmuch-pick")
 (make-variable-buffer-local 'notmuch-pick-query-context)
-(defvar notmuch-pick-target-msg nil)
+
+(defvar notmuch-pick-target-msg nil
+  "A buffer local copy of argument target to the function notmuch-pick")
 (make-variable-buffer-local 'notmuch-pick-target-msg)
-(defvar notmuch-pick-buffer-name nil)
+
+(defvar notmuch-pick-open-target nil
+  "A buffer local copy of argument open-target to the function notmuch-pick")
+(make-variable-buffer-local 'notmuch-pick-open-target)
+
+(defvar notmuch-pick-buffer-name nil
+  "A buffer local copy of argument buffer-name to the function notmuch-pick")
 (make-variable-buffer-local 'notmuch-pick-buffer-name)
-;; This variable is the window used for the message pane. It is set
-;; in both the parent pick buffer and the child show buffer. It is
-;; used to try and close the message pane when quitting pick or the
-;; child show buffer.
-(defvar notmuch-pick-message-window nil)
+
+(defvar notmuch-pick-message-window nil
+  "The window of the message pane.
+
+It is set in both the pick buffer and the child show buffer. It
+is used to try and close the message pane when quitting pick or
+the child show buffer.")
 (make-variable-buffer-local 'notmuch-pick-message-window)
 (put 'notmuch-pick-message-window 'permanent-local t)
-(defvar notmuch-pick-message-buffer nil)
-(make-variable-buffer-local 'notmuch-pick-message-buffer-name)
-(put 'notmuch-pick-message-buffer-name 'permanent-local t)
-(defvar notmuch-pick-process-state nil
-  "Parsing state of the search process filter.")
 
+(defvar notmuch-pick-message-buffer nil
+  "The buffer name of the show buffer in the message pane.
+
+This is used to try and make sure we don't close the message pane
+if the user has loaded a different buffer in that window.")
+(make-variable-buffer-local 'notmuch-pick-message-buffer)
+(put 'notmuch-pick-message-buffer 'permanent-local t)
 
 (defvar notmuch-pick-mode-map
   (let ((map (make-sparse-keymap)))
@@ -200,6 +214,11 @@
 (fset 'notmuch-pick-mode-map notmuch-pick-mode-map)
 
 (defun notmuch-pick-setup-show-out ()
+  "Set up the keymap for showing a thread
+
+This uses the value of the defcustom notmuch-pick-show-out to
+decide whether to show a message in the message pane or in the
+whole window."
   (let ((map notmuch-pick-mode-map))
     (if notmuch-pick-show-out
 	(progn
@@ -257,13 +276,25 @@ Some useful entries are:
   (notmuch-pick-get-prop :match))
 
 (defun notmuch-pick-refresh-result ()
+  "Redisplay the current message line.
+
+This redisplays the current line based on the messages
+properties (as they are now). This is used when tags are
+updated."
   (let ((init-point (point))
 	(end (line-end-position))
 	(msg (notmuch-pick-get-message-properties))
 	(inhibit-read-only t))
     (beginning-of-line)
-    (delete-region (point) (1+ (line-end-position)))
-    (notmuch-pick-insert-msg msg)
+    ;; This is a little tricky: we override
+    ;; notmuch-pick-previous-subject to get the decision between
+    ;; ... and a subject right and it stops notmuch-pick-insert-msg
+    ;; from overwriting the buffer local copy of
+    ;; notmuch-pick-previous-subject if this is called while the
+    ;; buffer is displaying.
+    (let ((notmuch-pick-previous-subject (notmuch-pick-get-prop :previous-subject)))
+      (delete-region (point) (1+ (line-end-position)))
+      (notmuch-pick-insert-msg msg))
     (let ((new-end (line-end-position)))
       (goto-char (if (= init-point end)
 		     new-end
@@ -349,10 +380,11 @@ Does NOT change the database."
   (notmuch-pick (notmuch-search-find-thread-id)
                 notmuch-search-query-string
 		nil
-                (notmuch-prettify-subject (notmuch-search-find-subject)))
-  (notmuch-pick-show-match-message-with-wait))
+                (notmuch-prettify-subject (notmuch-search-find-subject))
+		t))
 
 (defun notmuch-pick-message-window-kill-hook ()
+  "Close the message pane when exiting the show buffer."
   (let ((buffer (current-buffer)))
     (when (and (window-live-p notmuch-pick-message-window)
 	       (eq (window-buffer notmuch-pick-message-window) buffer))
@@ -487,22 +519,6 @@ message will be \"unarchived\", i.e. the tag changes in
   (while (and (not (eobp)) (not (notmuch-pick-get-match)))
     (forward-line))
   (when (window-live-p notmuch-pick-message-window)
-    (notmuch-pick-show-message)))
-
-(defun notmuch-pick-show-match-message-with-wait ()
-  "Show the first matching message but wait for it to appear or search to finish."
-  (interactive)
-  (unless (notmuch-pick-get-match)
-    (notmuch-pick-next-matching-message))
-  (while (and (not (notmuch-pick-get-match))
-	      (get-buffer-process (current-buffer)))
-    (message "waiting for message")
-    (sit-for 0.1)
-    (goto-char (point-min))
-    (unless (notmuch-pick-get-match)
-      (notmuch-pick-next-matching-message)))
-  (message nil)
-  (when (notmuch-pick-get-match)
     (notmuch-pick-show-message)))
 
 (defun notmuch-pick-refresh-view ()
@@ -642,24 +658,35 @@ unchanged ADDRESS if parsing fails."
 
 (defun notmuch-pick-insert-msg (msg)
   "Insert the message MSG according to notmuch-pick-result-format"
-  (dolist (spec notmuch-pick-result-format)
-    (notmuch-pick-insert-field (car spec) (cdr spec) msg))
-  (notmuch-pick-set-message-properties msg)
-  (insert "\n"))
+  ;; We need to save the previous subject as it will get overwritten
+  ;; by the insert-field calls.
+  (let ((previous-subject notmuch-pick-previous-subject))
+    (dolist (spec notmuch-pick-result-format)
+      (notmuch-pick-insert-field (car spec) (cdr spec) msg))
+    (notmuch-pick-set-message-properties msg)
+    (notmuch-pick-set-prop :previous-subject previous-subject)
+    (insert "\n")))
 
 (defun notmuch-pick-goto-and-insert-msg (msg)
   "Insert msg at the end of the buffer. Move point to msg if it is the target"
   (save-excursion
     (goto-char (point-max))
     (notmuch-pick-insert-msg msg))
-  (let ((msg-id (notmuch-id-to-query (plist-get msg :id))))
-    (when (string= msg-id notmuch-pick-target-msg)
+  (let ((msg-id (notmuch-id-to-query (plist-get msg :id)))
+	(target notmuch-pick-target-msg))
+    (when (or (and (not target) (plist-get msg :match))
+	      (string= msg-id target))
       (setq notmuch-pick-target-msg "found")
       (goto-char (point-max))
-      (forward-line -1))))
+      (forward-line -1)
+      (when notmuch-pick-open-target
+	(notmuch-pick-show-message)))))
 
 (defun notmuch-pick-insert-tree (tree depth tree-status first last)
-  "Insert the message tree TREE at depth DEPTH in the current thread."
+  "Insert the message tree TREE at depth DEPTH in the current thread.
+
+A message tree is another name for a single sub-thread: i.e., a
+message together with all its descendents."
   (let ((msg (car tree))
 	(replies (cadr tree)))
 
@@ -690,7 +717,7 @@ unchanged ADDRESS if parsing fails."
     (notmuch-pick-insert-thread replies (1+ depth) tree-status)))
 
 (defun notmuch-pick-insert-thread (thread depth tree-status)
-  "Insert the thread THREAD at depth DEPTH >= 1 in the current forest."
+  "Insert the collection of sibling sub-threads THREAD at depth DEPTH in the current forest."
   (let ((n (length thread)))
     (loop for tree in thread
 	  for count from 1 to n
@@ -698,12 +725,17 @@ unchanged ADDRESS if parsing fails."
 	  do (notmuch-pick-insert-tree tree depth tree-status (eq count 1) (eq count n)))))
 
 (defun notmuch-pick-insert-forest-thread (forest-thread)
+  "Insert a single complete thread."
   (let (tree-status)
     ;; Reset at the start of each main thread.
     (setq notmuch-pick-previous-subject nil)
     (notmuch-pick-insert-thread forest-thread 0 tree-status)))
 
 (defun notmuch-pick-insert-forest (forest)
+  "Insert a forest of threads.
+
+This function inserts a collection of several complete threads as
+passed to it by notmuch-pick-process-filter."
   (mapc 'notmuch-pick-insert-forest-thread forest))
 
 (defun notmuch-pick-mode ()
@@ -751,15 +783,6 @@ Complete list of currently available key bindings:
 		      (insert (format " (process returned %d)" exit-status)))
 		    (insert "\n")))))))))
 
-
-(defun notmuch-pick-show-error (string &rest objects)
-  (save-excursion
-    (goto-char (point-max))
-    (insert "Error: Unexpected output from notmuch search:\n")
-    (insert (apply #'format string objects))
-    (insert "\n")))
-
-
 (defun notmuch-pick-process-filter (proc string)
   "Process and filter the output of \"notmuch show\" (for pick)"
   (let ((results-buf (process-buffer proc))
@@ -776,13 +799,14 @@ Complete list of currently available key bindings:
 	(notmuch-sexp-parse-partial-list 'notmuch-pick-insert-forest-thread
 					 results-buf)))))
 
-(defun notmuch-pick-worker (basic-query &optional query-context target buffer)
+(defun notmuch-pick-worker (basic-query &optional query-context target buffer open-target)
   (interactive)
   (notmuch-pick-mode)
   (setq notmuch-pick-basic-query basic-query)
   (setq notmuch-pick-query-context query-context)
   (setq notmuch-pick-buffer-name (buffer-name buffer))
   (setq notmuch-pick-target-msg target)
+  (setq notmuch-pick-open-target open-target)
 
   (erase-buffer)
   (goto-char (point-min))
@@ -793,16 +817,15 @@ Complete list of currently available key bindings:
     (if (equal (car (process-lines notmuch-command "count" search-args)) "0")
 	(setq search-args basic-query))
     (if notmuch-pick-asynchronous-parser
-	(let ((proc (start-process
-		     "notmuch-pick" buffer
-		     notmuch-command "show" "--body=false" "--format=sexp"
+	(let ((proc (notmuch-start-notmuch
+		     "notmuch-pick" buffer #'notmuch-pick-process-sentinel
+		     "show" "--body=false" "--format=sexp"
 		     message-arg search-args))
 	      ;; Use a scratch buffer to accumulate partial output.
               ;; This buffer will be killed by the sentinel, which
               ;; should be called no matter how the process dies.
               (parse-buf (generate-new-buffer " *notmuch pick parse*")))
           (process-put proc 'parse-buf parse-buf)
-	  (set-process-sentinel proc 'notmuch-pick-process-sentinel)
 	  (set-process-filter proc 'notmuch-pick-process-filter)
 	  (set-process-query-on-exit-flag proc nil))
       (progn
@@ -814,8 +837,20 @@ Complete list of currently available key bindings:
 	  (insert "End of search results.\n"))))))
 
 
-(defun notmuch-pick (&optional query query-context target buffer-name show-first-match)
-  "Run notmuch pick with the given `query' and display the results"
+(defun notmuch-pick (&optional query query-context target buffer-name open-target)
+  "Run notmuch pick with the given `query' and display the results.
+
+The arguments are:
+  QUERY: the main query. This can be any query but in many cases will be
+      a single thread. If nil this is read interactively from the minibuffer.
+  QUERY-CONTEXT: is an additional term for the query. The query used
+      is QUERY and QUERY-CONTEXT unless that does not match any messages
+      in which case we fall back to just QUERY.
+  TARGET: A message ID (with the id: prefix) that will be made
+      current if it appears in the pick results.
+  BUFFER-NAME: the name of the buffer to show the pick tree. If
+      it is nil \"*notmuch-pick\" followed by QUERY is used.
+  OPEN-TARGET: If TRUE open the target message in the message pane."
   (interactive "sNotmuch pick: ")
   (if (null query)
       (setq query (notmuch-read-query "Notmuch pick: ")))
@@ -828,11 +863,9 @@ Complete list of currently available key bindings:
     ;; Don't track undo information for this buffer
     (set 'buffer-undo-list t)
 
-    (notmuch-pick-worker query query-context target buffer)
+    (notmuch-pick-worker query query-context target buffer open-target)
 
-    (setq truncate-lines t)
-    (when show-first-match
-      (notmuch-pick-show-match-message-with-wait))))
+    (setq truncate-lines t)))
 
 
 ;; Set up key bindings from the rest of notmuch.
