@@ -77,11 +77,6 @@
   :type '(alist :key-type (string) :value-type (string))
   :group 'notmuch-pick)
 
-(defcustom notmuch-pick-asynchronous-parser t
-  "Use the asynchronous parser."
-  :type 'boolean
-  :group 'notmuch-pick)
-
 ;; Faces for messages that match the query.
 (defface notmuch-pick-match-date-face
   '((t :inherit default))
@@ -166,10 +161,6 @@
   "A buffer local copy of argument open-target to the function notmuch-pick")
 (make-variable-buffer-local 'notmuch-pick-open-target)
 
-(defvar notmuch-pick-buffer-name nil
-  "A buffer local copy of argument buffer-name to the function notmuch-pick")
-(make-variable-buffer-local 'notmuch-pick-buffer-name)
-
 (defvar notmuch-pick-message-window nil
   "The window of the message pane.
 
@@ -187,27 +178,79 @@ if the user has loaded a different buffer in that window.")
 (make-variable-buffer-local 'notmuch-pick-message-buffer)
 (put 'notmuch-pick-message-buffer 'permanent-local t)
 
+(defun notmuch-pick-to-message-pane (func)
+  "Execute FUNC in message pane.
+
+This function returns a function (so can be used as a keybinding)
+which executes function FUNC in the message pane if it is
+open (if the message pane is closed it does nothing)."
+  `(lambda ()
+      ,(concat "(In message pane) " (documentation func t))
+     (interactive)
+     (when (window-live-p notmuch-pick-message-window)
+       (with-selected-window notmuch-pick-message-window
+	 (call-interactively #',func)))))
+
+(defun notmuch-pick-button-activate (&optional button)
+  "Activate BUTTON or button at point
+
+This function does not give an error if there is no button."
+  (interactive)
+  (let ((button (or button (button-at (point)))))
+    (when button (button-activate button))))
+
+(defun notmuch-pick-close-message-pane-and (func)
+  "Close message pane and execute FUNC.
+
+This function returns a function (so can be used as a keybinding)
+which closes the message pane if open and then executes function
+FUNC."
+  `(lambda ()
+      ,(concat "(Close message pane and) " (documentation func t))
+     (interactive)
+     (notmuch-pick-close-message-window)
+     (call-interactively #',func)))
+
 (defvar notmuch-pick-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] 'notmuch-pick-show-message)
+    ;; these use notmuch-show functions directly
+    (define-key map "|" 'notmuch-show-pipe-message)
+    (define-key map "w" 'notmuch-show-save-attachments)
+    (define-key map "v" 'notmuch-show-view-all-mime-parts)
+    (define-key map "c" 'notmuch-show-stash-map)
+
+    ;; these apply to the message pane
+    (define-key map (kbd "M-TAB") (notmuch-pick-to-message-pane #'notmuch-show-previous-button))
+    (define-key map (kbd "<backtab>")  (notmuch-pick-to-message-pane #'notmuch-show-previous-button))
+    (define-key map (kbd "TAB") (notmuch-pick-to-message-pane #'notmuch-show-next-button))
+    (define-key map "e" (notmuch-pick-to-message-pane #'notmuch-pick-button-activate))
+
+    ;; bindings from show (or elsewhere) but we close the message pane first.
+    (define-key map "m" (notmuch-pick-close-message-pane-and #'notmuch-mua-new-mail))
+    (define-key map "f" (notmuch-pick-close-message-pane-and #'notmuch-show-forward-message))
+    (define-key map "r" (notmuch-pick-close-message-pane-and #'notmuch-show-reply-sender))
+    (define-key map "R" (notmuch-pick-close-message-pane-and #'notmuch-show-reply))
+    (define-key map "V" (notmuch-pick-close-message-pane-and #'notmuch-show-view-raw-message))
+    (define-key map "?" (notmuch-pick-close-message-pane-and #'notmuch-help))
+
+    ;; The main pick bindings
     (define-key map "q" 'notmuch-pick-quit)
     (define-key map "x" 'notmuch-pick-quit)
-    (define-key map "?" 'notmuch-help)
+    (define-key map "A" 'notmuch-pick-archive-thread)
     (define-key map "a" 'notmuch-pick-archive-message-then-next)
     (define-key map "=" 'notmuch-pick-refresh-view)
     (define-key map "s" 'notmuch-pick-to-search)
     (define-key map "z" 'notmuch-pick-to-pick)
-    (define-key map "m" 'notmuch-pick-new-mail)
-    (define-key map "f" 'notmuch-pick-forward-message)
-    (define-key map "r" 'notmuch-pick-reply-sender)
-    (define-key map "R" 'notmuch-pick-reply)
     (define-key map "n" 'notmuch-pick-next-matching-message)
     (define-key map "p" 'notmuch-pick-prev-matching-message)
     (define-key map "N" 'notmuch-pick-next-message)
     (define-key map "P" 'notmuch-pick-prev-message)
-    (define-key map "|" 'notmuch-pick-pipe-message)
+    (define-key map (kbd "M-p") 'notmuch-pick-prev-thread)
+    (define-key map (kbd "M-n") 'notmuch-pick-next-thread)
     (define-key map "-" 'notmuch-pick-remove-tag)
     (define-key map "+" 'notmuch-pick-add-tag)
+    (define-key map "*" 'notmuch-pick-tag-thread)
     (define-key map " " 'notmuch-pick-scroll-or-next)
     (define-key map "b" 'notmuch-pick-scroll-message-window-back)
     map))
@@ -237,6 +280,22 @@ Some useful entries are:
   (save-excursion
     (beginning-of-line)
     (get-text-property (point) :notmuch-message-properties)))
+
+;; XXX This should really be a lib function but we are trying to
+;; reduce impact on the code base.
+(defun notmuch-show-get-prop (prop &optional props)
+  "This is a pick overridden version of notmuch-show-get-prop
+
+It gets property PROP from PROPS or, if PROPS is nil, the current
+message in either pick or show. This means that several functions
+in notmuch-show now work unchanged in pick as they just need the
+correct message properties."
+  (let ((props (or props
+		   (cond ((eq major-mode 'notmuch-show-mode)
+			  (notmuch-show-get-message-properties))
+			 ((eq major-mode 'notmuch-pick-mode)
+			  (notmuch-pick-get-message-properties))))))
+    (plist-get props prop)))
 
 (defun notmuch-pick-set-message-properties (props)
   (save-excursion
@@ -527,76 +586,70 @@ message will be \"unarchived\", i.e. the tag changes in
   (let ((inhibit-read-only t)
 	(basic-query notmuch-pick-basic-query)
 	(query-context notmuch-pick-query-context)
-	(target (notmuch-pick-get-message-id))
-	(buffer-name notmuch-pick-buffer-name))
+	(target (notmuch-pick-get-message-id)))
     (erase-buffer)
     (notmuch-pick-worker basic-query
 			 query-context
-			 target
-			 (get-buffer buffer-name))))
+			 target)))
 
-(defmacro with-current-notmuch-pick-message (&rest body)
-  "Evaluate body with current buffer set to the text of current message"
-  `(save-excursion
-     (let ((id (notmuch-pick-get-message-id)))
-       (let ((buf (generate-new-buffer (concat "*notmuch-msg-" id "*"))))
-         (with-current-buffer buf
-	    (call-process notmuch-command nil t nil "show" "--format=raw" id)
-           ,@body)
-	 (kill-buffer buf)))))
+(defun notmuch-pick-thread-top ()
+  (when (notmuch-pick-get-message-properties)
+    (while (not (or (notmuch-pick-get-prop :first) (eobp)))
+      (forward-line -1))))
 
-(defun notmuch-pick-new-mail (&optional prompt-for-sender)
-  "Compose new mail."
+(defun notmuch-pick-prev-thread ()
+  (interactive)
+  (forward-line -1)
+  (notmuch-pick-thread-top))
+
+(defun notmuch-pick-next-thread ()
+  (interactive)
+  (forward-line 1)
+  (while (not (or (notmuch-pick-get-prop :first) (eobp)))
+    (forward-line 1)))
+
+(defun notmuch-pick-thread-mapcar (function)
+  "Iterate through all messages in the current thread
+ and call FUNCTION for side effects."
+  (save-excursion
+    (notmuch-pick-thread-top)
+    (loop collect (funcall function)
+	  do (forward-line)
+	  while (and (notmuch-pick-get-message-properties)
+		     (not (notmuch-pick-get-prop :first))))))
+
+(defun notmuch-pick-get-messages-ids-thread-search ()
+  "Return a search string for all message ids of messages in the current thread."
+  (mapconcat 'identity
+	     (notmuch-pick-thread-mapcar 'notmuch-pick-get-message-id)
+	     " or "))
+
+(defun notmuch-pick-tag-thread (&optional tag-changes)
+  "Tag all messages in the current thread"
+  (interactive)
+  (when (notmuch-pick-get-message-properties)
+    (let ((tag-changes (notmuch-tag (notmuch-pick-get-messages-ids-thread-search) tag-changes)))
+      (notmuch-pick-thread-mapcar
+       (lambda () (notmuch-pick-tag-update-display tag-changes))))))
+
+(defun notmuch-pick-archive-thread (&optional unarchive)
+  "Archive each message in thread.
+
+Archive each message currently shown by applying the tag changes
+in `notmuch-archive-tags' to each. If a prefix argument is given,
+the messages will be \"unarchived\", i.e. the tag changes in
+`notmuch-archive-tags' will be reversed.
+
+Note: This command is safe from any race condition of new messages
+being delivered to the same thread. It does not archive the
+entire thread, but only the messages shown in the current
+buffer."
   (interactive "P")
-  (notmuch-pick-close-message-window)
-  (notmuch-mua-new-mail prompt-for-sender ))
+  (when notmuch-archive-tags
+    (notmuch-pick-tag-thread
+     (notmuch-tag-change-list notmuch-archive-tags unarchive))))
 
-(defun notmuch-pick-forward-message (&optional prompt-for-sender)
-  "Forward the current message."
-  (interactive "P")
-  (notmuch-pick-close-message-window)
-  (with-current-notmuch-pick-message
-   (notmuch-mua-new-forward-message prompt-for-sender)))
-
-(defun notmuch-pick-reply (&optional prompt-for-sender)
-  "Reply to the sender and all recipients of the current message."
-  (interactive "P")
-  (notmuch-pick-close-message-window)
-  (notmuch-mua-new-reply (notmuch-pick-get-message-id) prompt-for-sender t))
-
-(defun notmuch-pick-reply-sender (&optional prompt-for-sender)
-  "Reply to the sender of the current message."
-  (interactive "P")
-  (notmuch-pick-close-message-window)
-  (notmuch-mua-new-reply (notmuch-pick-get-message-id) prompt-for-sender nil))
-
-;; Shamelessly stolen from notmuch-show.el: maybe should be unified.
-(defun notmuch-pick-pipe-message (command)
-  "Pipe the contents of the current message to the given command.
-
-The given command will be executed with the raw contents of the
-current email message as stdin. Anything printed by the command
-to stdout or stderr will appear in the *notmuch-pipe* buffer.
-
-When invoked with a prefix argument, the command will receive all
-open messages in the current thread (formatted as an mbox) rather
-than only the current message."
-  (interactive "sPipe message to command: ")
-  (let ((shell-command
-	 (concat notmuch-command " show --format=raw "
-		 (shell-quote-argument (notmuch-pick-get-message-id)) " | " command))
-	 (buf (get-buffer-create (concat "*notmuch-pipe*"))))
-    (with-current-buffer buf
-      (setq buffer-read-only nil)
-      (erase-buffer)
-      (let ((exit-code (call-process-shell-command shell-command nil buf)))
-	(goto-char (point-max))
-	(set-buffer-modified-p nil)
-	(setq buffer-read-only t)
-	(unless (zerop exit-code)
-	  (switch-to-buffer-other-window buf)
-	  (message (format "Command '%s' exited abnormally with code %d"
-			   shell-command exit-code)))))))
+;; Functions below here display the pick buffer itself.
 
 (defun notmuch-pick-clean-address (address)
   "Try to clean a single email ADDRESS for display. Return
@@ -706,6 +759,7 @@ message together with all its descendents."
 	(push "├" tree-status)))
 
       (push (concat (if replies "┬" "─") "►") tree-status)
+      (plist-put msg :first (and first (eq 0 depth)))
       (notmuch-pick-goto-and-insert-msg (plist-put msg :tree-status tree-status))
       (pop tree-status)
       (pop tree-status)
@@ -799,12 +853,15 @@ Complete list of currently available key bindings:
 	(notmuch-sexp-parse-partial-list 'notmuch-pick-insert-forest-thread
 					 results-buf)))))
 
-(defun notmuch-pick-worker (basic-query &optional query-context target buffer open-target)
+(defun notmuch-pick-worker (basic-query &optional query-context target open-target)
+  "Insert the actual pick search in the current buffer.
+
+This is is a helper function for notmuch-pick. The arguments are
+the same as for the function notmuch-pick."
   (interactive)
   (notmuch-pick-mode)
   (setq notmuch-pick-basic-query basic-query)
   (setq notmuch-pick-query-context query-context)
-  (setq notmuch-pick-buffer-name (buffer-name buffer))
   (setq notmuch-pick-target-msg target)
   (setq notmuch-pick-open-target open-target)
 
@@ -816,26 +873,17 @@ Complete list of currently available key bindings:
 	 (message-arg "--entire-thread"))
     (if (equal (car (process-lines notmuch-command "count" search-args)) "0")
 	(setq search-args basic-query))
-    (if notmuch-pick-asynchronous-parser
-	(let ((proc (notmuch-start-notmuch
-		     "notmuch-pick" buffer #'notmuch-pick-process-sentinel
-		     "show" "--body=false" "--format=sexp"
-		     message-arg search-args))
-	      ;; Use a scratch buffer to accumulate partial output.
-              ;; This buffer will be killed by the sentinel, which
-              ;; should be called no matter how the process dies.
-              (parse-buf (generate-new-buffer " *notmuch pick parse*")))
-          (process-put proc 'parse-buf parse-buf)
-	  (set-process-filter proc 'notmuch-pick-process-filter)
-	  (set-process-query-on-exit-flag proc nil))
-      (progn
-	(notmuch-pick-insert-forest
-	 (notmuch-query-get-threads
-	  (list "--body=false" message-arg search-args)))
-	(save-excursion
-	  (goto-char (point-max))
-	  (insert "End of search results.\n"))))))
-
+    (let ((proc (notmuch-start-notmuch
+		 "notmuch-pick" (current-buffer) #'notmuch-pick-process-sentinel
+		 "show" "--body=false" "--format=sexp"
+		 message-arg search-args))
+	  ;; Use a scratch buffer to accumulate partial output.
+	  ;; This buffer will be killed by the sentinel, which
+	  ;; should be called no matter how the process dies.
+	  (parse-buf (generate-new-buffer " *notmuch pick parse*")))
+      (process-put proc 'parse-buf parse-buf)
+      (set-process-filter proc 'notmuch-pick-process-filter)
+      (set-process-query-on-exit-flag proc nil))))
 
 (defun notmuch-pick (&optional query query-context target buffer-name open-target)
   "Run notmuch pick with the given `query' and display the results.
@@ -859,13 +907,13 @@ The arguments are:
 					(concat "*notmuch-pick-" query "*")))))
 	(inhibit-read-only t))
 
-    (switch-to-buffer buffer)
-    ;; Don't track undo information for this buffer
-    (set 'buffer-undo-list t)
+    (switch-to-buffer buffer))
+  ;; Don't track undo information for this buffer
+  (set 'buffer-undo-list t)
 
-    (notmuch-pick-worker query query-context target buffer open-target)
+  (notmuch-pick-worker query query-context target open-target)
 
-    (setq truncate-lines t)))
+  (setq truncate-lines t))
 
 
 ;; Set up key bindings from the rest of notmuch.
