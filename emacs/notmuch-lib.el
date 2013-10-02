@@ -76,6 +76,33 @@ search."
   :type 'boolean
   :group 'notmuch-search)
 
+(defcustom notmuch-poll-script nil
+  "An external script to incorporate new mail into the notmuch database.
+
+This variable controls the action invoked by
+`notmuch-search-poll-and-refresh-view' and
+`notmuch-hello-poll-and-update' (each have a default keybinding
+of 'G') to incorporate new mail into the notmuch database.
+
+If set to nil (the default), new mail is processed by invoking
+\"notmuch new\". Otherwise, this should be set to a string that
+gives the name of an external script that processes new mail. If
+set to the empty string, no command will be run.
+
+The external script could do any of the following depending on
+the user's needs:
+
+1. Invoke a program to transfer mail to the local mail store
+2. Invoke \"notmuch new\" to incorporate the new mail
+3. Invoke one or more \"notmuch tag\" commands to classify the mail
+
+Note that the recommended way of achieving the same is using
+\"notmuch new\" hooks."
+  :type '(choice (const :tag "notmuch new" nil)
+		 (const :tag "Disabled" "")
+		 (string :tag "Custom script"))
+  :group 'notmuch-external)
+
 ;;
 
 (defvar notmuch-search-history nil
@@ -100,6 +127,17 @@ For example, if you wanted to remove an \"inbox\" tag and add an
   :type '(repeat string)
   :group 'notmuch-search
   :group 'notmuch-show)
+
+(defvar notmuch-common-keymap
+  (let ((map (make-sparse-keymap)))
+    (define-key map "?" 'notmuch-help)
+    (define-key map "q" 'notmuch-kill-this-buffer)
+    (define-key map "s" 'notmuch-search)
+    (define-key map "m" 'notmuch-mua-new-mail)
+    (define-key map "=" 'notmuch-refresh-this-buffer)
+    (define-key map "G" 'notmuch-poll-and-refresh-this-buffer)
+    map)
+  "Keymap shared by all notmuch modes.")
 
 ;; By default clicking on a button does not select the window
 ;; containing the button (as opposed to clicking on a widget which
@@ -161,10 +199,40 @@ Otherwise the output will be returned"
   "Return the user.other_email value (as a list) from the notmuch configuration."
   (split-string (notmuch-config-get "user.other_email") "\n"))
 
+(defun notmuch-poll ()
+  "Run \"notmuch new\" or an external script to import mail.
+
+Invokes `notmuch-poll-script', \"notmuch new\", or does nothing
+depending on the value of `notmuch-poll-script'."
+  (interactive)
+  (if (stringp notmuch-poll-script)
+      (unless (string= notmuch-poll-script "")
+	(call-process notmuch-poll-script nil nil))
+    (call-process notmuch-command nil nil nil "new")))
+
 (defun notmuch-kill-this-buffer ()
   "Kill the current buffer."
   (interactive)
   (kill-buffer (current-buffer)))
+
+(defvar notmuch-buffer-refresh-function nil
+  "Function to call to refresh the current buffer.")
+(make-variable-buffer-local 'notmuch-buffer-refresh-function)
+
+(defun notmuch-refresh-this-buffer ()
+  "Refresh the current buffer."
+  (interactive)
+  (when notmuch-buffer-refresh-function
+    (if (commandp notmuch-buffer-refresh-function)
+	;; Pass prefix argument, etc.
+	(call-interactively notmuch-buffer-refresh-function)
+      (funcall notmuch-buffer-refresh-function))))
+
+(defun notmuch-poll-and-refresh-this-buffer ()
+  "Invoke `notmuch-poll' to import mail, then refresh the current buffer."
+  (interactive)
+  (notmuch-poll)
+  (notmuch-refresh-this-buffer))
 
 (defun notmuch-prettify-subject (subject)
   ;; This function is used by `notmuch-search-process-filter' which
@@ -557,7 +625,6 @@ status."
 ;; declared globally first to avoid compiler warnings.
 (defvar notmuch-show-process-crypto nil)
 (make-variable-buffer-local 'notmuch-show-process-crypto)
-
 
 (provide 'notmuch-lib)
 

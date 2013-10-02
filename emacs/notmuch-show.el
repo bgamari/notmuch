@@ -470,7 +470,7 @@ message at DEPTH in the current thread."
 	     (new-start (button-start button))
 	     (button-label (button-get button :base-label))
 	     (old-point (point))
-	     (properties (text-properties-at (point)))
+	     (properties (text-properties-at (button-start button)))
 	     (inhibit-read-only t))
 	;; Toggle the button itself.
 	(button-put button :notmuch-part-hidden (not show))
@@ -588,6 +588,10 @@ message at DEPTH in the current thread."
 
     ;; Render the primary part.
     (notmuch-show-insert-bodypart msg (car inner-parts) depth)
+    ;; Add hidden buttons for the rest
+    (mapc (lambda (inner-part)
+	    (notmuch-show-insert-bodypart msg inner-part depth t))
+	  (cdr inner-parts))
 
     (when notmuch-show-indent-multipart
       (indent-rigidly start (point) 1)))
@@ -844,7 +848,11 @@ message at DEPTH in the current thread."
 (defun notmuch-show-insert-bodypart (msg part depth &optional hide)
   "Insert the body part PART at depth DEPTH in the current thread.
 
-If HIDE is non-nil then initially hide this part."
+HIDE determines whether to show or hide the part and the button
+as follows: If HIDE is nil, show the part and the button. If HIDE
+is t, hide the part initially and show the button. If HIDE is
+'no-buttons, show the part but do not add any buttons (this is
+useful for quoting in replies)."
 
   (let* ((content-type (downcase (plist-get part :content-type)))
 	 (mime-type (or (and (string= content-type "application/octet-stream")
@@ -854,15 +862,19 @@ If HIDE is non-nil then initially hide this part."
 			content-type))
 	 (nth (plist-get part :id))
 	 (beg (point))
-	 ;; We omit the part button for the first (or only) part if this is text/plain.
-	 (button (unless (and (string= mime-type "text/plain") (<= nth 1))
+	 ;; Hide the part initially if HIDE is t.
+	 (show-part (not (equal hide t)))
+	 ;; We omit the part button for the first (or only) part if
+	 ;; this is text/plain, or HIDE is 'no-buttons.
+	 (button (unless (or (equal hide 'no-buttons)
+			     (and (string= mime-type "text/plain") (<= nth 1)))
 		   (notmuch-show-insert-part-header nth mime-type content-type (plist-get part :filename))))
 	 (content-beg (point)))
 
     ;; Store the computed mime-type for later use (e.g. by attachment handlers).
     (plist-put part :computed-type mime-type)
 
-    (if (not hide)
+    (if show-part
         (notmuch-show-insert-bodypart-internal msg part mime-type nth depth button)
       (button-put button :notmuch-lazy-part
                   (list msg part mime-type nth depth button)))
@@ -875,7 +887,7 @@ If HIDE is non-nil then initially hide this part."
       (insert "\n"))
     ;; We do not create the overlay for hidden (lazy) parts until
     ;; they are inserted.
-    (if (not hide)
+    (if show-part
 	(notmuch-show-create-part-overlays button content-beg (point))
       (save-excursion
 	(notmuch-show-toggle-part-invisibility button)))
@@ -1231,14 +1243,11 @@ reset based on the original query."
 
 (defvar notmuch-show-mode-map
       (let ((map (make-sparse-keymap)))
-	(define-key map "?" 'notmuch-help)
-	(define-key map "q" 'notmuch-kill-this-buffer)
+	(set-keymap-parent map notmuch-common-keymap)
 	(define-key map (kbd "<C-tab>") 'widget-backward)
 	(define-key map (kbd "M-TAB") 'notmuch-show-previous-button)
 	(define-key map (kbd "<backtab>") 'notmuch-show-previous-button)
 	(define-key map (kbd "TAB") 'notmuch-show-next-button)
-	(define-key map "s" 'notmuch-search)
-	(define-key map "m" 'notmuch-mua-new-mail)
 	(define-key map "f" 'notmuch-show-forward-message)
 	(define-key map "r" 'notmuch-show-reply-sender)
 	(define-key map "R" 'notmuch-show-reply)
@@ -1246,7 +1255,6 @@ reset based on the original query."
 	(define-key map "w" 'notmuch-show-save-attachments)
 	(define-key map "V" 'notmuch-show-view-raw-message)
 	(define-key map "c" 'notmuch-show-stash-map)
-	(define-key map "=" 'notmuch-show-refresh-view)
 	(define-key map "h" 'notmuch-show-toggle-visibility-headers)
 	(define-key map "*" 'notmuch-show-tag-all)
 	(define-key map "-" 'notmuch-show-remove-tag)
@@ -1305,6 +1313,7 @@ All currently available key bindings:
 \\{notmuch-show-mode-map}"
   (interactive)
   (kill-all-local-variables)
+  (setq notmuch-buffer-refresh-function #'notmuch-show-refresh-view)
   (use-local-map notmuch-show-mode-map)
   (setq major-mode 'notmuch-show-mode
 	mode-name "notmuch-show")
