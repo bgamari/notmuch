@@ -313,8 +313,9 @@ the From: header is already filled in by notmuch."
       (ido-completing-read "Send mail From: " notmuch-identities
 			   nil nil nil 'notmuch-mua-sender-history (car notmuch-identities)))))
 
+(put 'notmuch-mua-new-mail 'notmuch-prefix-doc "... and prompt for sender")
 (defun notmuch-mua-new-mail (&optional prompt-for-sender)
-  "Invoke the notmuch mail composition window.
+  "Compose new mail.
 
 If PROMPT-FOR-SENDER is non-nil, the user will be prompted for
 the From: address first."
@@ -327,9 +328,10 @@ the From: address first."
 (defun notmuch-mua-new-forward-message (&optional prompt-for-sender)
   "Invoke the notmuch message forwarding window.
 
+The current buffer must contain an RFC2822 message to forward.
+
 If PROMPT-FOR-SENDER is non-nil, the user will be prompted for
 the From: address first."
-  (interactive "P")
   (if (or prompt-for-sender notmuch-always-prompt-for-sender)
       (let* ((sender (notmuch-mua-prompt-for-sender))
 	     (address-components (mail-extract-address-components sender))
@@ -339,8 +341,11 @@ the From: address first."
     (notmuch-mua-forward-message)))
 
 (defun notmuch-mua-new-reply (query-string &optional prompt-for-sender reply-all)
-  "Invoke the notmuch reply window."
-  (interactive "P")
+  "Compose a reply to the message identified by QUERY-STRING.
+
+If PROMPT-FOR-SENDER is non-nil, the user will be prompted for
+the From: address first.  If REPLY-ALL is non-nil, the message
+will be addressed to all recipients of the source message."
   (let ((sender
 	 (when prompt-for-sender
 	   (notmuch-mua-prompt-for-sender))))

@@ -140,21 +140,35 @@ This is basically just `format-kbd-macro' but we also convert ESC to M-."
 	"M-"
       (concat desc " "))))
 
-(defun notmuch-describe-keymap (keymap &optional prefix tail)
-  "Return a list of strings, each describing one key in KEYMAP.
+(defun notmuch-describe-keymap (keymap ua-keys &optional prefix tail)
+  "Return a list of strings, each describing one binding in KEYMAP.
 
-Each string gives a human-readable description of the key and the
-first line of documentation for the bound function."
+Each string gives a human-readable description of the key and a
+one-line description of the bound function.  See `notmuch-help'
+for an overview of how this documentation is extracted.
+
+UA-KEYS should be a key sequence bound to `universal-argument'.
+It will be used to describe bindings of commands that support a
+prefix argument.  PREFIX and TAIL are used internally."
   (map-keymap
    (lambda (key binding)
      (cond ((mouse-event-p key) nil)
 	   ((keymapp binding)
 	    (setq tail
 		  (notmuch-describe-keymap
-		   binding (notmuch-prefix-key-description key) tail)))
+		   binding ua-keys (notmuch-prefix-key-description key) tail)))
 	   (t
+	    (when (and ua-keys (symbolp binding)
+		       (get binding 'notmuch-prefix-doc))
+	      ;; Documentation for prefixed command
+	      (let ((ua-desc (key-description ua-keys)))
+		(push (concat ua-desc " " prefix (format-kbd-macro (vector key))
+			      "\t" (get binding 'notmuch-prefix-doc))
+		      tail)))
+	    ;; Documentation for command
 	    (push (concat prefix (format-kbd-macro (vector key)) "\t"
-			  (notmuch-documentation-first-line binding))
+			  (or (and (symbolp binding) (get binding 'notmuch-doc))
+			      (notmuch-documentation-first-line binding)))
 		  tail))))
    keymap)
   tail)
@@ -165,14 +179,24 @@ first line of documentation for the bound function."
     (while (string-match "\\\\{\\([^}[:space:]]*\\)}" doc beg)
       (let* ((keymap-name (substring doc (match-beginning 1) (match-end 1)))
 	     (keymap (symbol-value (intern keymap-name)))
-	     (desc-list (notmuch-describe-keymap keymap))
+	     (ua-keys (where-is-internal 'universal-argument keymap t))
+	     (desc-list (notmuch-describe-keymap keymap ua-keys))
 	     (desc (mapconcat #'identity desc-list "\n")))
 	(setq doc (replace-match desc 1 1 doc)))
       (setq beg (match-end 0)))
     doc))
 
 (defun notmuch-help ()
-  "Display help for the current notmuch mode."
+  "Display help for the current notmuch mode.
+
+This is similar to `describe-function' for the current major
+mode, but bindings tables are shown with documentation strings
+rather than command names.  By default, this uses the first line
+of each command's documentation string.  A command can override
+this by setting the 'notmuch-doc property of its command symbol.
+A command that supports a prefix argument can explicitly document
+its prefixed behavior by setting the 'notmuch-prefix-doc property
+of its command symbol."
   (interactive)
   (let* ((mode major-mode)
 	 (doc (substitute-command-keys (notmuch-substitute-command-keys (documentation mode t)))))
@@ -556,15 +580,21 @@ See `notmuch-tag' for information on the format of TAG-CHANGES."
     (notmuch-search-tag-region beg end tag-changes)))
 
 (defun notmuch-search-add-tag ()
-  "Same as `notmuch-search-tag' but sets initial input to '+'."
+  "Change tags for the current thread (defaulting to add).
+
+Same as `notmuch-search-tag' but sets initial input to '+'."
   (interactive)
   (notmuch-search-tag "+"))
 
 (defun notmuch-search-remove-tag ()
-  "Same as `notmuch-search-tag' but sets initial input to '-'."
+  "Change tags for the current thread (defaulting to remove).
+
+Same as `notmuch-search-tag' but sets initial input to '-'."
   (interactive)
   (notmuch-search-tag "-"))
 
+(put 'notmuch-search-archive-thread 'notmuch-prefix-doc
+     "Un-archive the currently selected thread.")
 (defun notmuch-search-archive-thread (&optional unarchive)
   "Archive the currently selected thread.
 
@@ -868,16 +898,17 @@ PROMPT is the string to prompt with."
 			      'notmuch-search-history nil nil)))))
 
 ;;;###autoload
+(put 'notmuch-search 'notmuch-doc "Search for messages.")
 (defun notmuch-search (&optional query oldest-first target-thread target-line)
-  "Run \"notmuch search\" with the given `query' and display results.
+  "Display threads matching QUERY in a notmuch-search buffer.
 
-If `query' is nil, it is read interactively from the minibuffer.
+If QUERY is nil, it is read interactively from the minibuffer.
 Other optional parameters are used as follows:
 
-  oldest-first: A Boolean controlling the sort order of returned threads
-  target-thread: A thread ID (without the thread: prefix) that will be made
+  OLDEST-FIRST: A Boolean controlling the sort order of returned threads
+  TARGET-THREAD: A thread ID (without the thread: prefix) that will be made
                  current if it appears in the search results.
-  target-line: The line number to move to if the target thread does not
+  TARGET-LINE: The line number to move to if the target thread does not
                appear in the search results.
 
 When called interactively, this will prompt for a query and use
