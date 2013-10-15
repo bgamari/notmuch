@@ -938,7 +938,25 @@ notmuch_database_compact (const char* path,
     }
 
     if (rename(compact_xapian_path, xapian_path)) {
-	fprintf (stderr, "Error moving compacted database\n");
+	fprintf (stderr, "Error moving compacted database into place: %s\n", strerror(errno));
+	fprintf (stderr, "\n");
+	fprintf (stderr, "Encountered error while moving the compacted database\n");
+	fprintf (stderr, "\n");
+	fprintf (stderr, "    %s\n", compact_xapian_path);
+	fprintf (stderr, "\n");
+	fprintf (stderr, "to\n");
+	fprintf (stderr, "\n");
+	fprintf (stderr, "    %s\n", xapian_path);
+	fprintf (stderr, "\n");
+	fprintf (stderr, "Please identify the reason for this and move the compacted database\n");
+	fprintf (stderr, "into place manually.\n");
+	if (old_xapian_path != NULL) {
+	    fprintf (stderr, "\n");
+	    fprintf (stderr, "Alternatively you can revert to the uncompacted database with\n");
+	    fprintf (stderr, "\n");
+	    fprintf (stderr, "    mv %s %s\n", old_xapian_path, xapian_path);
+	    fprintf (stderr, "\n");
+	}
 	ret = NOTMUCH_STATUS_FILE_ERROR;
 	goto DONE;
     }
