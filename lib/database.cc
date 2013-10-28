@@ -934,7 +934,19 @@ notmuch_database_compact (const char* path,
 	    goto DONE;
 	}
     } else {
-	rmtree(xapian_path);
+	if (rmtree(xapian_path)) {
+	    fprintf (stderr, "Error removing old database: %s\n",
+		     strerror(errno));
+	    fprintf (stderr, "\n");
+	    fprintf (stderr, "Old database: %s\n", xapian_path);
+	    fprintf (stderr, "\n");
+	    fprintf (stderr, "Please remove the old database and move the compacted one in to place manually with\n");
+	    fprintf (stderr, "\n");
+	    fprintf (stderr, "    mv %s %s\n", compact_xapian_path, xapian_path);
+	    fprintf (stderr, "\n");
+	    ret = NOTMUCH_STATUS_FILE_ERROR;
+	    goto DONE;
+	}
     }
 
     if (rename(compact_xapian_path, xapian_path)) {
